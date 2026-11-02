@@ -2,6 +2,7 @@
 use chrono::{DateTime, Local};
 use serde::{Deserialize, Serialize};
 use std::ops::Range;
+pub mod channel;
 
 pub const MAX_FRAME: usize = 176; // companion MAX_FRAME_SIZE
 
@@ -30,6 +31,7 @@ pub struct Decoded {
     pub payload_range: Option<Range<usize>>,
     pub scope: Option<Scope>,
     pub channel_hash: Option<u8>,
+    pub channel: Option<channel::ChannelEnvelope>,
 }
 
 #[derive(Clone, Debug)]
@@ -452,7 +454,14 @@ fn decode_payload(r: &mut WireReader<'_>, d: &mut Decoded, ty: u8) -> Result<(),
                 .map_err(|_| "Truncated encrypted channel payload")?;
             d.field("MAC", hex(mac));
             r.value("Cipher MAC · not verified");
-            ciphertext(r, d, "channel key", "Truncated encrypted channel payload")?;
+            let encrypted = ciphertext(r, d, "channel key", "Truncated encrypted channel payload")?;
+            let field = r.fields.last().unwrap();
+            d.channel = Some(channel::ChannelEnvelope::new(
+                ty,
+                mac.try_into().unwrap(),
+                encrypted.to_vec(),
+                field.range.clone(),
+            ));
             d.summary = format!(
                 "Channel {hash:02X} · {} · {} path entries",
                 d.route.unwrap().name(),
@@ -543,18 +552,18 @@ fn decode_payload(r: &mut WireReader<'_>, d: &mut Decoded, ty: u8) -> Result<(),
     Ok(())
 }
 
-fn ciphertext(
-    r: &mut WireReader<'_>,
+fn ciphertext<'a>(
+    r: &mut WireReader<'a>,
     d: &mut Decoded,
     secret: &str,
     error: &'static str,
-) -> Result<(), &'static str> {
+) -> Result<&'a [u8], &'static str> {
     let size = r.remaining();
-    r.read("Ciphertext", size.max(1)).map_err(|_| error)?;
+    let bytes = r.read("Ciphertext", size.max(1)).map_err(|_| error)?;
     let interpretation = format!("Encrypted · {size} bytes · {secret} required");
     r.value(&interpretation);
     d.field("Content", interpretation);
-    Ok(())
+    Ok(bytes)
 }
 
 fn decode_advert_app(r: &mut WireReader<'_>, d: &mut Decoded) -> Result<(), &'static str> {
@@ -685,7 +694,7 @@ pub fn sample_frame(n: usize) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn assert_structure(fields: &[WireField], range: Range<usize>) {
+    pub(super) fn assert_structure(fields: &[WireField], range: Range<usize>) {
         let mut end = range.start;
         for field in fields {
             assert_eq!(field.range.start, end, "out of order: {}", field.name);

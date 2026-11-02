@@ -592,7 +592,7 @@ fn help(f: &mut Frame, colors: bool) {
         Line::from("Details follow wire order: hex offset, byte length, bytes → value."),
         Line::from("Path entries are hashes, not unique node identities. Direct"),
         Line::from("routes show remaining path; trace paths contain SNR samples."),
-        Line::from("Encrypted content needs keys; advertisements are unverified."),
+        Line::from("Channel keys decrypt text/data; sender names remain unverified."),
         Line::from(""),
         Line::from("Retention is bounded. --record saves frames before eviction."),
         Line::from("Default details show radio bytes; --show-companion shows companion"),
@@ -627,6 +627,10 @@ fn color_help(f: &mut Frame) {
             details::PAYLOAD,
         ),
         ("Path / identity values / path bytes", details::PATH),
+        (
+            "Decrypted channel fields / plaintext offsets",
+            details::PLAINTEXT,
+        ),
         (
             "Scope codes / region candidates / scope bytes",
             details::SCOPE,

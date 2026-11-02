@@ -387,11 +387,14 @@ impl Catalogue {
             decoded.fields.push(("Region candidates".into(), value));
         }
         if let Some(hash) = decoded.channel_hash {
-            let names: Vec<_> = self
+            let candidates: Vec<_> = self
                 .channels()
                 .iter()
                 .filter(|c| c.value.channel_hash() == hash)
-                .map(candidate_name)
+                .collect();
+            let names: Vec<_> = candidates
+                .iter()
+                .map(|entry| candidate_name(entry))
                 .collect();
             if !names.is_empty() {
                 decoded
@@ -399,12 +402,15 @@ impl Catalogue {
                     .push_str(&format!(" · {}?", names.join(" / ")));
                 decoded.fields.push((
                     "Channel candidates".into(),
-                    format!(
-                        "{} · 8-bit hash match; content not verified",
-                        names.join(" / ")
-                    ),
+                    format!("{} · 8-bit hash candidates", names.join(" / ")),
                 ));
             }
+            crate::protocol::channel::apply_keys(
+                decoded,
+                candidates
+                    .into_iter()
+                    .map(|entry| (candidate_name(entry), entry.value.bytes())),
+            );
         }
     }
     fn save(&self, data: &Data) -> Result<()> {
@@ -527,6 +533,96 @@ fn candidate_name(entry: &CatalogueEntry) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn channel_mac_checks_resolve_hash_collisions_but_preserve_aliases_and_real_ambiguity() {
+        use crate::protocol::{
+            channel::{
+                ChannelStatus,
+                test_vectors::{all, bytes, frame, get},
+            },
+            decode,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let mut catalogue = Catalogue::load(dir.path().join("catalogue.json")).unwrap();
+        let vector = get("public_text");
+        catalogue
+            .add(Category::Channel, "Public alias", &vector.key)
+            .unwrap();
+        let values = all();
+        catalogue
+            .add(
+                Category::Channel,
+                "Wrong hash collision",
+                values["public_hash_collision_key"].as_str().unwrap(),
+            )
+            .unwrap();
+        let mut decoded = decode(&frame(&vector));
+        catalogue.annotate(&mut decoded);
+        let ChannelStatus::Decrypted(plain) = &decoded.channel.as_ref().unwrap().status else {
+            panic!();
+        };
+        assert_eq!(plain.channels, ["Public", "Public alias"]);
+        assert_eq!(plain.bytes, bytes(&vector.plaintext));
+        assert!(
+            decoded
+                .fields
+                .iter()
+                .any(|(name, value)| name == "Channel candidates"
+                    && value.contains("Wrong hash collision"))
+        );
+        let collision = &values["ambiguous"];
+        catalogue
+            .add(
+                Category::Channel,
+                "Collision one",
+                collision["keys"][0].as_str().unwrap(),
+            )
+            .unwrap();
+        catalogue
+            .add(
+                Category::Channel,
+                "Collision two",
+                collision["keys"][1].as_str().unwrap(),
+            )
+            .unwrap();
+        let mut wire = vec![
+            0x88,
+            0,
+            150,
+            0x15,
+            0,
+            collision["hash"].as_u64().unwrap() as u8,
+        ];
+        wire.extend(bytes(collision["mac"].as_str().unwrap()));
+        wire.extend(bytes(collision["ciphertext"].as_str().unwrap()));
+        let mut decoded = decode(&wire);
+        catalogue.annotate(&mut decoded);
+        assert!(matches!(
+            decoded.channel.as_ref().unwrap().status,
+            ChannelStatus::Ambiguous(_)
+        ));
+        assert!(decoded.warning.as_ref().unwrap().contains("ambiguous"));
+        // Region matching still uses the original encrypted payload.
+        catalogue.add_region("test").unwrap();
+        let base = frame(&vector);
+        let code = Known::region("test").unwrap().transport_code(5, &base[5..]);
+        let mut scoped = vec![0x88, 0, 150, 0x14];
+        scoped.extend_from_slice(&code.to_le_bytes());
+        scoped.extend_from_slice(&[0, 0, 0]);
+        scoped.extend_from_slice(&base[5..]);
+        let mut decoded = decode(&scoped);
+        catalogue.annotate(&mut decoded);
+        assert!(
+            decoded
+                .fields
+                .iter()
+                .any(|(name, value)| name == "Region candidates" && value.contains("test"))
+        );
+        assert!(matches!(
+            decoded.channel.as_ref().unwrap().status,
+            ChannelStatus::Decrypted(_)
+        ));
+    }
     fn extra_channels(catalogue: &Catalogue) -> Vec<&CatalogueEntry> {
         catalogue
             .channels()

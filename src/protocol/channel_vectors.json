@@ -1,0 +1,105 @@
+{
+  "provenance": "AES generated independently with OpenSSL AES-128-ECB -nopad; zero padding and HMAC-SHA256 computed with Python stdlib. Test keys only.",
+  "vectors": [
+    {
+      "name": "public_text",
+      "payload_type": 5,
+      "key": "8b3387e9c5cdea6ac9e5edbaa115cd72",
+      "channel_hash": 17,
+      "mac": "d5bd",
+      "ciphertext": "d8528976583f68981cf304e2a9492e275be4e2761c62b2464fd9ddf422cd3fd3",
+      "plaintext": "404fe76a00416c6963653a2068656c6c6f206d65736800000000000000000000",
+      "warning": false
+    },
+    {
+      "name": "unicode_text",
+      "payload_type": 5,
+      "key": "9cd8fcf22a47333b591d96a2b848b73f",
+      "channel_hash": 217,
+      "mac": "811e",
+      "ciphertext": "3cb85f5857959d6691998543f402ff63ecda510b552e9ed11314916383bb537f",
+      "plaintext": "404fe76a0352c3a96c6169733a2068c3a96c6c6f20e69db1e4baac0000000000",
+      "warning": false
+    },
+    {
+      "name": "binary_datagram",
+      "payload_type": 6,
+      "key": "000102030405060708090a0b0c0d0e0f",
+      "channel_hash": 190,
+      "mac": "7477",
+      "ciphertext": "8e9c9747fe2b055d1f72671a0bf6e62b",
+      "plaintext": "00ff05006100ff000000000000000000",
+      "warning": false
+    },
+    {
+      "name": "unsupported_text",
+      "payload_type": 5,
+      "key": "8b3387e9c5cdea6ac9e5edbaa115cd72",
+      "channel_hash": 17,
+      "mac": "ba0d",
+      "ciphertext": "9fb58951b306d32204510b17b8fa95dba10f37a224f5064d772354633c4c1f22",
+      "plaintext": "404fe76a04416c6963653a202f696e666f000000000000000000000000000000",
+      "warning": true
+    },
+    {
+      "name": "bad_datagram_length",
+      "payload_type": 6,
+      "key": "000102030405060708090a0b0c0d0e0f",
+      "channel_hash": 190,
+      "mac": "1d8c",
+      "ciphertext": "438ec3a20fe2df1d395dc934ee162a02",
+      "plaintext": "3412ff61626300000000000000000000",
+      "warning": true
+    },
+    {
+      "name": "trailing_text",
+      "payload_type": 5,
+      "key": "8b3387e9c5cdea6ac9e5edbaa115cd72",
+      "channel_hash": 17,
+      "mac": "0ee0",
+      "ciphertext": "bcbc2d635577a32ba5f0548e1e71c87c9d95045b7ac71380a76d4762b646ea9e",
+      "plaintext": "404fe76a00416c6963653a206869007461696c00000000000000000000000000",
+      "warning": true
+    },
+    {
+      "name": "invalid_utf8",
+      "payload_type": 5,
+      "key": "8b3387e9c5cdea6ac9e5edbaa115cd72",
+      "channel_hash": 17,
+      "mac": "ff23",
+      "ciphertext": "3125067025c75ed8dec102903462e3be",
+      "plaintext": "404fe76a00416c6963653a20ff686900",
+      "warning": true
+    },
+    {
+      "name": "empty_text",
+      "payload_type": 5,
+      "key": "8b3387e9c5cdea6ac9e5edbaa115cd72",
+      "channel_hash": 17,
+      "mac": "dc45",
+      "ciphertext": "aedd847aa79ce1ae013d3a325a0b24a0",
+      "plaintext": "404fe76a000000000000000000000000",
+      "warning": false
+    },
+    {
+      "name": "aligned_text",
+      "payload_type": 5,
+      "key": "8b3387e9c5cdea6ac9e5edbaa115cd72",
+      "channel_hash": 17,
+      "mac": "ff70",
+      "ciphertext": "857874c6af4ace0eb37d9af4f146d742",
+      "plaintext": "404fe76a00416c6963653a2074657374",
+      "warning": false
+    }
+  ],
+  "ambiguous": {
+    "hash": 144,
+    "mac": "31da",
+    "ciphertext": "00000000000000000000000000000000",
+    "keys": [
+      "9c020000000000000000000000000000",
+      "cd050000000000000000000000000000"
+    ]
+  },
+  "public_hash_collision_key": "0b000000000000000000000000000000"
+}

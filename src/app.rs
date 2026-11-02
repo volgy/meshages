@@ -45,6 +45,14 @@ impl Entry {
                 append(node, &mut text);
             }
         }
+        if let Some(channel) = &self.decoded.channel
+            && let crate::protocol::channel::ChannelStatus::Decrypted(plain) = &channel.status
+        {
+            for node in &plain.fields {
+                append(node, &mut text);
+            }
+            text.push_str(&crate::protocol::hex(&plain.bytes));
+        }
         text
     }
 }
@@ -752,5 +760,107 @@ mod tests {
             assert_eq!(app.visible.len(), 1);
             assert_eq!(app.selected().unwrap().capture.frame, frame);
         }
+    }
+
+    #[test]
+    fn catalogue_changes_decrypt_and_relock_retained_packets_and_search_without_changing_exports() {
+        use crate::protocol::channel::{
+            ChannelStatus,
+            test_vectors::{bytes, frame, get},
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let catalogue_path = dir.path().join("catalogue.json");
+        let export_path = dir.path().join("capture.jsonl");
+        let mut app = App::new(
+            "test".into(),
+            10,
+            false,
+            export_path.clone(),
+            Catalogue::load(catalogue_path.clone()).unwrap(),
+        );
+        let public = get("public_text");
+        app.push(Capture {
+            at: chrono::Local::now(),
+            frame: frame(&public),
+        })
+        .unwrap();
+        assert!(matches!(
+            app.entries[0].decoded.channel.as_ref().unwrap().status,
+            ChannelStatus::Decrypted(_)
+        ));
+        let vector = get("unicode_text");
+        let original = frame(&vector);
+        app.push(Capture {
+            at: chrono::Local::now(),
+            frame: original.clone(),
+        })
+        .unwrap();
+        assert!(matches!(
+            app.entries[1].decoded.channel.as_ref().unwrap().status,
+            ChannelStatus::NoKey
+        ));
+        app.filter = "héllo".into();
+        app.refilter();
+        assert!(app.visible.is_empty());
+        press(&mut app, KeyCode::Char('c'));
+        press(&mut app, KeyCode::Char('a'));
+        for character in "#test".chars() {
+            press(&mut app, KeyCode::Char(character));
+        }
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.visible.len(), 1);
+        assert_eq!(app.selected().unwrap().id, 2);
+        assert_eq!(app.selected().unwrap().capture.frame, original);
+        app.export().unwrap();
+        let exported: Capture =
+            serde_json::from_str(std::fs::read_to_string(export_path).unwrap().trim()).unwrap();
+        assert_eq!(exported.frame, original);
+        press(&mut app, KeyCode::Delete);
+        assert!(app.visible.is_empty());
+        assert!(matches!(
+            app.entries[1].decoded.channel.as_ref().unwrap().status,
+            ChannelStatus::NoKey
+        ));
+        let mut channel = vec![0; 50];
+        channel[0] = 0x12;
+        channel[1] = 2;
+        channel[2..8].copy_from_slice(b"Device");
+        channel[34..].copy_from_slice(&bytes(&vector.key));
+        app.push(Capture {
+            at: chrono::Local::now(),
+            frame: channel,
+        })
+        .unwrap();
+        assert_eq!(app.entries.len(), 2); // Hidden metadata still refreshes retained packets.
+        assert_eq!(app.visible.len(), 1);
+        let ChannelStatus::Decrypted(plain) = &app
+            .selected()
+            .unwrap()
+            .decoded
+            .channel
+            .as_ref()
+            .unwrap()
+            .status
+        else {
+            panic!();
+        };
+        assert_eq!(plain.channels, ["Device"]);
+        assert_eq!(app.selected().unwrap().capture.frame, original);
+        let mut cleared = vec![0; 50];
+        cleared[0] = 0x12;
+        cleared[1] = 2;
+        app.push(Capture {
+            at: chrono::Local::now(),
+            frame: cleared,
+        })
+        .unwrap();
+        assert!(app.visible.is_empty());
+        assert!(matches!(
+            app.entries[1].decoded.channel.as_ref().unwrap().status,
+            ChannelStatus::NoKey
+        ));
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(catalogue_path).unwrap()).unwrap();
+        assert_eq!(saved["channels"], serde_json::json!([]));
     }
 }

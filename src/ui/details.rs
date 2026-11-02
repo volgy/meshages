@@ -1,5 +1,6 @@
 //! Compact packet inspection with semantic sections and byte coloring.
 use super::{ACCENT, COMPANION, MUTED, PANEL, block, packet_color};
+use crate::protocol::channel::{ChannelStatus, Plaintext};
 use crate::{
     app::{App, Entry},
     protocol::{Route, WireField, hex},
@@ -9,6 +10,7 @@ use ratatui::{prelude::*, widgets::*};
 pub(super) const PAYLOAD: Color = Color::Rgb(214, 157, 245);
 pub(super) const SCOPE: Color = Color::Rgb(151, 180, 255);
 pub(super) const PATH: Color = Color::Rgb(110, 190, 239);
+pub(super) const PLAINTEXT: Color = Color::Rgb(136, 213, 161);
 const GENERAL_BG: Color = Color::Rgb(24, 43, 48);
 const PAYLOAD_BG: Color = Color::Rgb(34, 27, 46);
 const LABEL_WIDTH: usize = 16;
@@ -128,7 +130,7 @@ fn section(
 fn label(key: &str) -> &str {
     match key {
         "Name (unverified)" => "Name",
-        "Advert timestamp" => "Timestamp",
+        "Advert timestamp" | "Message timestamp" => "Timestamp",
         _ => key,
     }
 }
@@ -139,8 +141,15 @@ fn wire_color(name: &str, inherited: Color) -> Color {
         "Header" | "Route type" | "Payload type" | "Payload version" => ACCENT,
         "Transport codes" | "Code 1" | "Code 2" => SCOPE,
         "Path" | "Path length" | "Entry count" | "Entry width" => PATH,
-        "Public key" | "Sender public key" | "Name (unverified)" | "Node role" | "Latitude"
-        | "Longitude" => PATH,
+        "Public key"
+        | "Sender public key"
+        | "Name (unverified)"
+        | "Node role"
+        | "Latitude"
+        | "Longitude"
+        | "Sender name (unverified)" => PATH,
+        "Padding" => MUTED,
+        "Trailing bytes" => Color::Yellow,
         "MAC" | "Signature" | "Auth code" => Color::Yellow,
         "Acknowledgment" => Color::Green,
         _ => inherited,
@@ -185,15 +194,20 @@ fn styled_wrap(spans: Vec<Span<'static>>, width: usize) -> Vec<Line<'static>> {
 
 struct Inspector<'a> {
     entry: &'a Entry,
+    bytes: &'a [u8],
+    plaintext: bool,
     origin: usize,
     width: usize,
     lines: Vec<Line<'static>>,
 }
 impl Inspector<'_> {
     fn path_values(&self, node: &WireField) -> Option<Vec<Span<'static>>> {
+        if self.plaintext {
+            return None;
+        }
         let raw = |range: std::ops::Range<usize>| {
             Span::styled(
-                hex(self.entry.capture.frame.get(range).unwrap_or_default()).replace(' ', ""),
+                hex(self.bytes.get(range).unwrap_or_default()).replace(' ', ""),
                 Style::default().fg(PATH),
             )
         };
@@ -241,6 +255,60 @@ impl Inspector<'_> {
         Some(values)
     }
 
+    fn decrypted(&mut self, plain: &Plaintext) {
+        for (index, line) in wrapped(
+            &format!("DECRYPTED · {}", clean(&plain.channels.join(" / "))),
+            self.width.saturating_sub(9),
+        )
+        .into_iter()
+        .enumerate()
+        {
+            self.lines.push(Line::from(vec![
+                Span::styled(
+                    if index == 0 {
+                        "      └─ "
+                    } else {
+                        "         "
+                    },
+                    Style::default().fg(MUTED),
+                ),
+                Span::styled(line, Style::default().fg(PLAINTEXT).bold()),
+            ]));
+        }
+        for line in wrapped("p = plaintext offset", self.width.saturating_sub(9)) {
+            self.lines.push(Line::from(Span::styled(
+                format!("         {line}"),
+                Style::default().fg(MUTED),
+            )));
+        }
+        if let Some(warning) = &plain.warning {
+            field(
+                &mut self.lines,
+                "⚠ Plaintext",
+                warning,
+                Color::Yellow,
+                self.width,
+            );
+        }
+        let mut parsed = Inspector {
+            entry: self.entry,
+            bytes: &plain.bytes,
+            plaintext: true,
+            origin: 0,
+            width: self.width,
+            lines: vec![],
+        };
+        for (index, node) in plain.fields.iter().enumerate() {
+            parsed.node(
+                node,
+                "   ",
+                Some(index + 1 == plain.fields.len()),
+                PLAINTEXT,
+            );
+        }
+        self.lines.extend(parsed.lines);
+    }
+
     fn node(&mut self, node: &WireField, prefix: &str, branch: Option<bool>, inherited: Color) {
         let color = wire_color(&node.name, inherited);
         let tree = match branch {
@@ -250,6 +318,8 @@ impl Inspector<'_> {
         };
         let offset = if node.bits.is_some() {
             "      ".to_owned()
+        } else if self.plaintext {
+            format!("p{:04X} ", node.range.start)
         } else {
             format!("{:04X}  ", node.range.start.saturating_sub(self.origin))
         };
@@ -273,7 +343,7 @@ impl Inspector<'_> {
             && (node.children.is_empty() || node.children.iter().all(|child| child.bits.is_some()));
         let mut values = compact_path.unwrap_or_default();
         if let Some(bits) = &node.bits {
-            if let Some(byte) = self.entry.capture.frame.get(node.range.start) {
+            if let Some(byte) = self.bytes.get(node.range.start) {
                 let count = bits.end - bits.start;
                 let value = (*byte >> bits.start) & ((1u16 << count) - 1) as u8;
                 values.push(Span::styled(
@@ -287,12 +357,7 @@ impl Inspector<'_> {
                 ));
             }
         } else if show_raw {
-            let raw = self
-                .entry
-                .capture
-                .frame
-                .get(node.range.clone())
-                .unwrap_or_default();
+            let raw = self.bytes.get(node.range.clone()).unwrap_or_default();
             values.push(Span::styled(
                 if raw.is_empty() {
                     "∅".into()
@@ -316,13 +381,10 @@ impl Inspector<'_> {
         if values.is_empty() {
             self.lines.push(heading);
         } else {
-            let column = 32;
-            let inline = self.width.saturating_sub(column) >= 28 && heading.width() + 2 <= column;
-            let indent = if inline {
-                column
-            } else {
-                (6 + Line::from(prefix).width()).min(self.width / 3)
-            };
+            // Labels can spill onto their own row; all values keep a shared column.
+            let wide = self.width >= 60;
+            let column = if wide { 32 } else { self.width / 3 };
+            let inline = wide && heading.width() + 2 <= column;
             if inline {
                 heading
                     .spans
@@ -330,18 +392,26 @@ impl Inspector<'_> {
             } else {
                 self.lines.push(std::mem::take(&mut heading));
             }
-            for (index, value) in styled_wrap(values, self.width.saturating_sub(indent))
+            for (index, value) in styled_wrap(values, self.width.saturating_sub(column))
                 .into_iter()
                 .enumerate()
             {
                 let mut line = if index == 0 && inline {
                     std::mem::take(&mut heading)
                 } else {
-                    Line::from(" ".repeat(indent))
+                    Line::from(" ".repeat(column))
                 };
                 line.spans.extend(value.spans);
                 self.lines.push(line);
             }
+        }
+        if !self.plaintext
+            && node.name == "Ciphertext"
+            && let Some(channel) = &self.entry.decoded.channel
+            && node.range == channel.range
+            && let ChannelStatus::Decrypted(plain) = &channel.status
+        {
+            self.decrypted(plain);
         }
         // Catalogue matches are annotations, not additional bytes on the wire.
         let annotation = match node.name.as_str() {
@@ -349,7 +419,8 @@ impl Inspector<'_> {
             "Channel hash" => Some(("Channel candidates", PAYLOAD)),
             _ => None,
         };
-        if let Some((key, color)) = annotation
+        if !self.plaintext
+            && let Some((key, color)) = annotation
             && let Some((_, value)) = self
                 .entry
                 .decoded
@@ -404,6 +475,8 @@ impl Inspector<'_> {
 fn document(entry: &Entry, show_companion: bool, width: usize) -> Vec<Line<'static>> {
     let mut inspector = Inspector {
         entry,
+        bytes: &entry.capture.frame,
+        plaintext: false,
         origin: if show_companion { 0 } else { 3 },
         width,
         lines: vec![],
@@ -636,6 +709,15 @@ pub(super) fn draw(f: &mut Frame, app: &mut App, area: Rect) {
                 Style::default().fg(Color::Yellow),
             ));
         } else if d
+            .channel
+            .as_ref()
+            .is_some_and(|channel| matches!(channel.status, ChannelStatus::Decrypted(_)))
+        {
+            badges.push(Span::styled(
+                "  DECRYPTED",
+                Style::default().fg(PLAINTEXT).bold(),
+            ));
+        } else if d
             .fields
             .iter()
             .any(|(key, value)| key == "Content" && value.starts_with("Encrypted"))
@@ -741,6 +823,146 @@ mod tests {
                     .into(),
                 frame,
             },
+        }
+    }
+
+    #[test]
+    fn decrypted_fields_use_plaintext_offsets_after_ciphertext_and_preserve_the_full_dump() {
+        use crate::protocol::channel::test_vectors::{bytes, frame, get};
+        for name in [
+            "public_text",
+            "unicode_text",
+            "binary_datagram",
+            "unsupported_text",
+            "bad_datagram_length",
+            "invalid_utf8",
+        ] {
+            let vector = get(name);
+            let dir = tempfile::tempdir().unwrap();
+            let mut catalogue =
+                crate::catalogue::Catalogue::load(dir.path().join("catalogue.json")).unwrap();
+            if name != "public_text" {
+                catalogue
+                    .add(crate::catalogue::Category::Channel, "Fixture", &vector.key)
+                    .unwrap();
+            }
+            let mut entry = make_entry(frame(&vector));
+            let wire = entry.capture.frame.clone();
+            catalogue.annotate(&mut entry.decoded);
+            for show_companion in [false, true] {
+                for width in [25, 43, 76, 118] {
+                    let lines = document(&entry, show_companion, width);
+                    let text = lines
+                        .iter()
+                        .map(Line::to_string)
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    assert!(text.find("Ciphertext").unwrap() < text.find("DECRYPTED").unwrap());
+                    assert!(text.find("DECRYPTED").unwrap() < text.find("p0000").unwrap());
+                    assert!(text.find("p0000").unwrap() < text.find("BYTES /").unwrap());
+                    let normalized: String = text.split_whitespace().collect();
+                    assert!(normalized.contains("p=plaintextoffset"));
+                    if name == "public_text" {
+                        assert!(
+                            text.contains("Alice")
+                                && normalized.contains("hellomesh")
+                                && text.contains("Sender name (unverified)")
+                        );
+                        let sender_bytes = "41 6C 69 63 65";
+                        let mac_bytes = hex(&bytes(&vector.mac));
+                        let sender = lines
+                            .iter()
+                            .map(Line::to_string)
+                            .find(|line| line.contains(sender_bytes))
+                            .unwrap();
+                        let mac = lines
+                            .iter()
+                            .map(Line::to_string)
+                            .find(|line| line.contains(&mac_bytes))
+                            .unwrap();
+                        let value_column = |line: &str, value: &str| {
+                            Line::from(&line[..line.find(value).unwrap()]).width()
+                        };
+                        assert_eq!(
+                            value_column(&sender, sender_bytes),
+                            value_column(&mac, &mac_bytes),
+                            "sender and MAC values must align at width {width}"
+                        );
+                        if let Some(continuation) = lines
+                            .iter()
+                            .map(Line::to_string)
+                            .find(|line| line.trim() == "Alice")
+                        {
+                            assert_eq!(
+                                value_column(&continuation, "Alice"),
+                                value_column(&mac, &mac_bytes)
+                            );
+                        }
+                    }
+                    if name == "binary_datagram" {
+                        assert!(normalized.contains("006100FF00") && text.contains("p0003"));
+                    }
+                    let start = lines
+                        .iter()
+                        .position(|line| line.to_string().contains("BYTES /"))
+                        .unwrap();
+                    let mut expected = vec![];
+                    byte_dump(&mut expected, &entry, show_companion, width);
+                    assert_eq!(&lines[start..], expected);
+                    assert_eq!(entry.capture.frame, wire);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn decrypted_packet_badge_and_plaintext_views_render_at_wide_and_minimum_sizes() {
+        use crate::protocol::channel::test_vectors::{frame, get};
+        for name in ["public_text", "binary_datagram", "bad_datagram_length"] {
+            let vector = get(name);
+            let dir = tempfile::tempdir().unwrap();
+            let mut catalogue =
+                crate::catalogue::Catalogue::load(dir.path().join("catalogue.json")).unwrap();
+            if name != "public_text" {
+                catalogue
+                    .add(crate::catalogue::Category::Channel, "Fixture", &vector.key)
+                    .unwrap();
+            }
+            let mut app = App::new(
+                "Test capture".into(),
+                100,
+                false,
+                "unused".into(),
+                catalogue,
+            );
+            app.push(make_entry(frame(&vector)).capture).unwrap();
+            for (width, height) in [(160, 60), (120, 40), (80, 40), (45, 15)] {
+                let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+                for expanded in [false, true] {
+                    app.expand_details = expanded;
+                    app.details = 0;
+                    terminal.draw(|f| super::super::draw(f, &mut app)).unwrap();
+                    let text: String = terminal
+                        .backend()
+                        .buffer()
+                        .content
+                        .iter()
+                        .map(|cell| cell.symbol())
+                        .collect();
+                    assert!(text.contains("DECRYPTED"));
+                    assert!(!text.contains("ENCRYPTED"));
+                    app.details = u16::MAX;
+                    terminal.draw(|f| super::super::draw(f, &mut app)).unwrap();
+                    let text: String = terminal
+                        .backend()
+                        .buffer()
+                        .content
+                        .iter()
+                        .map(|cell| cell.symbol())
+                        .collect();
+                    assert!(text.contains("DECRYPTED"));
+                }
+            }
         }
     }
 

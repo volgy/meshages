@@ -71,8 +71,12 @@ then fixed-width hashes such as `A217 → B903`, wrapping as needed. Trace paths
 each raw sample with its SNR, such as `04 (+1.00 dB) → F8 (-2.00 dB)`.
 
 Catalogue matches are marked as annotations beside the corresponding scope code
-or channel hash. Encrypted data remains ciphertext; reserved, unknown, and
-truncated fields retain their bytes without invented interpretations. Advert
+or channel hash. Available channel keys automatically check the MAC and decrypt
+channel text/data. A green **DECRYPTED** subtree appears below the original
+ciphertext, with `p0000` offsets referring to a separate plaintext buffer.
+It shows timestamp, flags, sender name/text, or datagram type/length/data, plus
+padding and any uninterpreted bytes. Channel sender names remain unverified.
+Reserved, unknown, and truncated fields retain their bytes. Advert
 fields and signatures remain explicitly unverified. The default view keeps RX
 signal metadata separate from the radio-byte offsets; `--show-companion` instead
 includes the companion type, SNR, and RSSI bytes in wire order, with offsets that
@@ -96,6 +100,8 @@ field, and uses the complete companion frame in **WIRE BYTES**. Serial/TCP lengt
 framing has already been stripped by the transport layer and is not part of
 either dump. Recordings and JSONL exports retain complete companion frames for
 replay, regardless of the display mode.
+Decrypted plaintext is reconstructed from available catalogue keys during live
+inspection or replay; recordings and exports keep the original wire frames.
 
 Every raw RX entry uses the same two-line format, including unknown or malformed
 packets (unavailable fields show `—`):
@@ -240,7 +246,9 @@ controls to add or remove manual channels. Leaving the key blank for `#name`
 derives a hashtag channel's 128-bit key from its exact name. Public is already
 available as a built-in. Other channel names require a 32-digit hexadecimal
 key. An explicit key overrides name-based derivation. Device slot numbers appear
-in the entry details. Channel decryption remains a future extension.
+in the entry details. Built-in, manual, and device keys are all used for channel
+decryption. Adding/removing keys or receiving device metadata reprocesses retained
+packets and updates search results. Search also includes decoded plaintext.
 
 Both pages show key fingerprints. Manual channel keys are stored as hexadecimal
 strings in the plain-text JSON file, including private-channel secrets. Device
@@ -253,9 +261,11 @@ Capture continues on these pages and while the add form is open.
 Catalogue entries annotate both new and retained packets, and their names are
 searchable. Region candidates match the first transport code using HMAC-SHA256
 over payload type and payload; the second transport code remains displayed as
-raw data. Channel candidates match the visible channel hash. These codes/hashes
-are only 16/8 bits, so candidates are marked with `?`; a match is not proof of
-identity or successful decryption. Multiple matches are displayed together.
+raw data. Channel hashes and region codes are only 8 and 16 bits respectively,
+so hash/code matches are treated as candidates. All channel
+hash candidates stay visible; the decrypted subtree identifies the key's matching
+channel names/aliases after its MAC check. Distinct keys that both pass the short
+MAC are reported as ambiguous, with no plaintext selected.
 
 ## Protocol and scope
 
@@ -275,18 +285,25 @@ Decoding follows the upstream firmware's
 [advert data](https://github.com/meshcore-dev/MeshCore/blob/main/src/helpers/AdvertDataHelpers.h),
 [serial framing](https://github.com/meshcore-dev/MeshCore/blob/main/src/helpers/ArduinoSerialInterface.cpp),
 [region keys and transport codes](https://github.com/meshcore-dev/MeshCore/blob/main/src/helpers/TransportKeyStore.cpp),
-and [channel hashes](https://github.com/meshcore-dev/MeshCore/blob/main/src/helpers/BaseChatMesh.cpp).
+and [channel payloads](https://github.com/meshcore-dev/MeshCore/blob/main/src/helpers/BaseChatMesh.cpp).
 
-Encrypted messages remain encrypted: the tool decodes their visible envelope,
-not plaintext. Advert signatures are displayed but not verified. Unknown payloads
-and unsupported versions retain their bytes. Path hashes do not uniquely identify
+Channel crypto follows the firmware's [AES-128 and HMAC implementation](https://github.com/meshcore-dev/MeshCore/blob/main/src/Utils.cpp):
+AES-128-ECB with zero padding, preceded by a two-byte HMAC-SHA256 tag over the
+ciphertext. The current catalogue supports 128-bit channel keys. A matching
+16-bit MAC is not proof of sender identity; anyone with the shared channel key
+can choose the displayed sender name. Datagram bodies remain application-defined
+bytes after decoding their type and declared length. Zero bytes within the
+declared data are preserved; padding and malformed trailing data stay inspectable.
+
+Peer messages remain encrypted. Advert signatures are displayed but not verified.
+Unknown payloads and unsupported versions retain their bytes. Path hashes do not uniquely identify
 nodes; direct paths contain remaining routing entries, and trace paths contain
 signal samples. Malformed packets stay inspectable with a warning.
 
 The input channel is bounded to 2,048 events. If rendering or recording cannot
 keep up, dropped frames are reported in the footer. Disk errors stop recording
 with an error instead of silently losing data. Contact-based identity resolution,
-key-based decryption, and active tools are future work.
+peer-message decryption, and active tools are future work.
 
 Modules separate transport (`source`, `ble`, `usb`), live device presence
 (`discovery`), connection selection (`connections`), wire decoding (`protocol`),
@@ -304,5 +321,7 @@ Automated checks exercise malformed packets, incremental framing, path encoding,
 USB firmware identification and hotplug, BLE expiry and system-device removal,
 stable connection selection, packet retention, filtering, manual catalogue
 persistence, read-only device metadata, duplicates/conflicts/aliases, startup
-queries, region matching, and terminal rendering.
+queries, region matching, and terminal rendering. Channel crypto tests use
+independent OpenSSL/Python vectors, including wrong keys, hash/MAC collisions,
+aliases, text, binary data, padding, and truncated or malformed plaintext.
 Actual USB/BLE behavior requires a companion for hardware verification.
