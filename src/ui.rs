@@ -589,7 +589,7 @@ fn help(f: &mut Frame, colors: bool) {
         Line::from("RX¹ shows RSSI (dBm), then SNR (dB) on the second line."),
         Line::from("PATH shows entry count, then encoded bytes per entry."),
         Line::from("Every RX row shows route and mesh bytes on its second line."),
-        Line::from("Details group packet/payload fields; byte colors have a legend."),
+        Line::from("Details follow wire order: hex offset, byte length, bytes → value."),
         Line::from("Path entries are hashes, not unique node identities. Direct"),
         Line::from("routes show remaining path; trace paths contain SNR samples."),
         Line::from("Encrypted content needs keys; advertisements are unverified."),

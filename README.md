@@ -59,10 +59,24 @@ distinct highlights.
 The detail pane keeps packet type, reception time, size, and warning/encryption
 status at the top while the rest scrolls. Teal **GENERAL PACKET** and violet
 **PAYLOAD** bars separate radio measurements and routing from the payload's
-contents. Compact label/value rows wrap with aligned continuation lines. Payload
-fields are grouped into identity, envelope, content, and authentication as needed;
-advert names and locations appear before long keys and signatures. Advert fields
-remain explicitly unverified.
+contents. The parsing tree follows packet byte order rather than grouping fields
+by purpose. Each field shows its hexadecimal offset, byte length in decimal,
+literal bytes, and interpretation where known (`bytes → value`). Nested rows
+decompose packed header/path bits, transport codes, path entries, and advert
+application data. Multi-byte integers show their little-endian interpretation;
+advert timestamps also show UTC time. Adverts therefore show the key, timestamp,
+signature, then application flags/location/features/name in their encoded order.
+Paths use compact rows: the encoded length byte followed by count × entry width,
+then fixed-width hashes such as `A217 → B903`, wrapping as needed. Trace paths pair
+each raw sample with its SNR, such as `04 (+1.00 dB) → F8 (-2.00 dB)`.
+
+Catalogue matches are marked as annotations beside the corresponding scope code
+or channel hash. Encrypted data remains ciphertext; reserved, unknown, and
+truncated fields retain their bytes without invented interpretations. Advert
+fields and signatures remain explicitly unverified. The default view keeps RX
+signal metadata separate from the radio-byte offsets; `--show-companion` instead
+includes the companion type, SNR, and RSSI bytes in wire order, with offsets that
+match the complete companion-frame dump.
 
 The complete offset/hex/ASCII dump follows the decoded fields. Bytes are colored
 by structure, with a legend: teal header, periwinkle scope codes, blue path,

@@ -29,6 +29,24 @@ impl Entry {
             self.capture.frame.get(3..).unwrap_or_default()
         }
     }
+    fn structure_text(&self, show_companion: bool) -> String {
+        fn append(node: &crate::protocol::WireField, text: &mut String) {
+            text.push_str(&node.name);
+            text.push(' ');
+            text.push_str(&node.interpretation);
+            text.push(' ');
+            for child in &node.children {
+                append(child, text);
+            }
+        }
+        let mut text = String::new();
+        for node in &self.decoded.structure {
+            if show_companion || !matches!(node.name.as_str(), "Companion type" | "SNR" | "RSSI") {
+                append(node, &mut text);
+            }
+        }
+        text
+    }
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Page {
@@ -330,10 +348,11 @@ impl App {
             .filter(|(_, e)| {
                 query.is_empty()
                     || format!(
-                        "{} {} {:?} {}",
+                        "{} {} {:?} {} {}",
                         e.decoded.kind,
                         e.decoded.summary,
                         e.detail_fields(self.show_companion).collect::<Vec<_>>(),
+                        e.structure_text(self.show_companion),
                         crate::protocol::hex(e.detail_bytes(self.show_companion))
                     )
                     .to_lowercase()
@@ -722,6 +741,11 @@ mod tests {
                 app.filter = query.into();
                 app.refilter();
                 assert_eq!(app.visible.len(), usize::from(show_companion));
+            }
+            for query in ["Entry width", "u32 LE"] {
+                app.filter = query.into();
+                app.refilter();
+                assert_eq!(app.visible.len(), 1);
             }
             app.filter = "0D 00 01 02 03 04".into();
             app.refilter();

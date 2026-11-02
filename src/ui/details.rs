@@ -2,7 +2,7 @@
 use super::{ACCENT, COMPANION, MUTED, PANEL, block, packet_color};
 use crate::{
     app::{App, Entry},
-    protocol::Route,
+    protocol::{Route, WireField, hex},
 };
 use ratatui::{prelude::*, widgets::*};
 
@@ -125,188 +125,380 @@ fn section(
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Group {
-    General,
-    Identity,
-    Envelope,
-    Security,
-    Content,
-}
-fn group(key: &str) -> Group {
-    match key {
-        "Companion type" | "SNR" | "RSSI" | "Header" | "Transport codes" | "Path"
-        | "Trace SNR samples" | "Region candidates" | "Payload" => Group::General,
-        "Name (unverified)"
-        | "Node role"
-        | "Location (unverified)"
-        | "Advert timestamp"
-        | "Public key" => Group::Identity,
-        "Destination hash"
-        | "Source hash"
-        | "Ephemeral public key"
-        | "Channel hash"
-        | "Channel candidates" => Group::Envelope,
-        "MAC" | "Signature" | "Verification" | "Auth code" => Group::Security,
-        _ => Group::Content,
-    }
-}
 fn label(key: &str) -> &str {
     match key {
         "Name (unverified)" => "Name",
-        "Location (unverified)" => "Location",
-        "Advert timestamp" => "Advertised",
-        "Destination hash" => "Destination",
-        "Source hash" => "Source",
-        "Ephemeral public key" => "Ephemeral key",
-        "Channel candidates" => "Channel",
-        "Application data" => "Raw app data",
+        "Advert timestamp" => "Timestamp",
         _ => key,
     }
 }
-fn value_color(key: &str) -> Color {
-    match key {
-        "Name (unverified)"
-        | "Node role"
-        | "Location (unverified)"
-        | "Public key"
-        | "Ephemeral public key"
-        | "Source hash"
-        | "Destination hash" => PATH,
-        "MAC" | "Auth code" | "Verification" => Color::Yellow,
+
+fn wire_color(name: &str, inherited: Color) -> Color {
+    match name {
+        "Companion type" | "SNR" | "RSSI" => COMPANION,
+        "Header" | "Route type" | "Payload type" | "Payload version" => ACCENT,
+        "Transport codes" | "Code 1" | "Code 2" => SCOPE,
+        "Path" | "Path length" | "Entry count" | "Entry width" => PATH,
+        "Public key" | "Sender public key" | "Name (unverified)" | "Node role" | "Latitude"
+        | "Longitude" => PATH,
+        "MAC" | "Signature" | "Auth code" => Color::Yellow,
         "Acknowledgment" => Color::Green,
-        "Signature" => MUTED,
-        "Channel hash" | "Channel candidates" | "Content" | "Body" | "Application data"
-        | "Trace data" => PAYLOAD,
-        _ => Color::White,
+        _ => inherited,
+    }
+}
+
+/// Word wrapping that preserves literal-byte and interpretation styles, including Unicode names.
+fn styled_wrap(spans: Vec<Span<'static>>, width: usize) -> Vec<Line<'static>> {
+    let width = width.max(1);
+    let mut lines = vec![];
+    let mut line = Line::default();
+    let mut used = 0;
+    for span in spans {
+        for word in span.content.split_whitespace() {
+            let word_width = Line::from(word).width();
+            if used > 0 && used + 1 + word_width > width {
+                lines.push(std::mem::take(&mut line));
+                used = 0;
+            }
+            if used > 0 {
+                line.spans.push(Span::styled(" ", span.style));
+                used += 1;
+            }
+            let word = Span::styled(word, span.style);
+            for grapheme in word.styled_graphemes(Style::default()) {
+                let size = Line::from(grapheme.symbol).width();
+                if used > 0 && used + size > width {
+                    lines.push(std::mem::take(&mut line));
+                    used = 0;
+                }
+                line.spans
+                    .push(Span::styled(grapheme.symbol.to_owned(), grapheme.style));
+                used += size;
+            }
+        }
+    }
+    if !line.spans.is_empty() {
+        lines.push(line);
+    }
+    lines
+}
+
+struct Inspector<'a> {
+    entry: &'a Entry,
+    origin: usize,
+    width: usize,
+    lines: Vec<Line<'static>>,
+}
+impl Inspector<'_> {
+    fn path_values(&self, node: &WireField) -> Option<Vec<Span<'static>>> {
+        let raw = |range: std::ops::Range<usize>| {
+            Span::styled(
+                hex(self.entry.capture.frame.get(range).unwrap_or_default()).replace(' ', ""),
+                Style::default().fg(PATH),
+            )
+        };
+        if node.name == "Path length" && node.children.len() == 2 {
+            return Some(vec![
+                raw(node.range.clone()),
+                Span::styled("→", Style::default().fg(MUTED)),
+                Span::styled(
+                    format!(
+                        "{} entries × {}",
+                        node.children[0].interpretation, node.children[1].interpretation
+                    ),
+                    Style::default().fg(Color::White),
+                ),
+            ]);
+        }
+        if node.name != "Path" {
+            return None;
+        }
+        if node.children.is_empty() {
+            return (self.entry.decoded.hops == Some(0))
+                .then(|| vec![Span::styled("∅ · empty", Style::default().fg(MUTED))]);
+        }
+        let mut values = vec![];
+        for (index, entry) in node.children.iter().enumerate() {
+            if index > 0 {
+                values.push(Span::styled("→", Style::default().fg(MUTED)));
+            }
+            values.push(raw(entry.range.clone()));
+            if !entry.interpretation.is_empty() {
+                // The compact trace still pairs each raw sample with its decoded SNR.
+                let value = entry
+                    .interpretation
+                    .strip_suffix(" (i8 / 4)")
+                    .unwrap_or(&entry.interpretation);
+                values.push(Span::styled(
+                    format!("({value})"),
+                    Style::default().fg(Color::White),
+                ));
+            }
+        }
+        if self.entry.decoded.kind == "Trace" {
+            values.push(Span::styled("· i8 / 4", Style::default().fg(MUTED)));
+        }
+        Some(values)
+    }
+
+    fn node(&mut self, node: &WireField, prefix: &str, branch: Option<bool>, inherited: Color) {
+        let color = wire_color(&node.name, inherited);
+        let tree = match branch {
+            Some(true) => "└─ ",
+            Some(false) => "├─ ",
+            None => "",
+        };
+        let offset = if node.bits.is_some() {
+            "      ".to_owned()
+        } else {
+            format!("{:04X}  ", node.range.start.saturating_sub(self.origin))
+        };
+        let size = if node.bits.is_some() {
+            String::new()
+        } else {
+            format!(" · {} B", node.range.len())
+        };
+        let mut heading = Line::from(vec![
+            Span::styled(offset, Style::default().fg(MUTED)),
+            Span::styled(format!("{prefix}{tree}"), Style::default().fg(MUTED)),
+            Span::styled(
+                label(&node.name).to_owned(),
+                Style::default().fg(color).bold(),
+            ),
+            Span::styled(size, Style::default().fg(MUTED)),
+        ]);
+        let compact_path = self.path_values(node);
+        let expand = compact_path.is_none();
+        let show_raw = expand
+            && (node.children.is_empty() || node.children.iter().all(|child| child.bits.is_some()));
+        let mut values = compact_path.unwrap_or_default();
+        if let Some(bits) = &node.bits {
+            if let Some(byte) = self.entry.capture.frame.get(node.range.start) {
+                let count = bits.end - bits.start;
+                let value = (*byte >> bits.start) & ((1u16 << count) - 1) as u8;
+                values.push(Span::styled(
+                    format!(
+                        "bits {}:{} = 0b{value:0count$b}",
+                        bits.end - 1,
+                        bits.start,
+                        count = count as usize
+                    ),
+                    Style::default().fg(color),
+                ));
+            }
+        } else if show_raw {
+            let raw = self
+                .entry
+                .capture
+                .frame
+                .get(node.range.clone())
+                .unwrap_or_default();
+            values.push(Span::styled(
+                if raw.is_empty() {
+                    "∅".into()
+                } else {
+                    hex(raw)
+                },
+                Style::default().fg(color),
+            ));
+        }
+        if expand && !node.interpretation.is_empty() {
+            if !values.is_empty() {
+                values.push(Span::styled("→", Style::default().fg(MUTED)));
+            }
+            let issue = node.interpretation.starts_with("Truncated")
+                || node.interpretation.starts_with("Missing");
+            values.push(Span::styled(
+                clean(&node.interpretation),
+                Style::default().fg(if issue { Color::Yellow } else { Color::White }),
+            ));
+        }
+        if values.is_empty() {
+            self.lines.push(heading);
+        } else {
+            let column = 32;
+            let inline = self.width.saturating_sub(column) >= 28 && heading.width() + 2 <= column;
+            let indent = if inline {
+                column
+            } else {
+                (6 + Line::from(prefix).width()).min(self.width / 3)
+            };
+            if inline {
+                heading
+                    .spans
+                    .push(Span::raw(" ".repeat(column - heading.width())));
+            } else {
+                self.lines.push(std::mem::take(&mut heading));
+            }
+            for (index, value) in styled_wrap(values, self.width.saturating_sub(indent))
+                .into_iter()
+                .enumerate()
+            {
+                let mut line = if index == 0 && inline {
+                    std::mem::take(&mut heading)
+                } else {
+                    Line::from(" ".repeat(indent))
+                };
+                line.spans.extend(value.spans);
+                self.lines.push(line);
+            }
+        }
+        // Catalogue matches are annotations, not additional bytes on the wire.
+        let annotation = match node.name.as_str() {
+            "Code 1" => Some(("Region candidates", SCOPE)),
+            "Channel hash" => Some(("Channel candidates", PAYLOAD)),
+            _ => None,
+        };
+        if let Some((key, color)) = annotation
+            && let Some((_, value)) = self
+                .entry
+                .decoded
+                .fields
+                .iter()
+                .find(|(name, _)| name == key)
+        {
+            let indent = format!("      {prefix}   ↳ ");
+            for (index, value) in wrapped(
+                &format!("Catalogue: {}", clean(value)),
+                self.width
+                    .saturating_sub(Line::from(indent.as_str()).width()),
+            )
+            .into_iter()
+            .enumerate()
+            {
+                self.lines.push(Line::from(vec![
+                    Span::styled(
+                        if index == 0 {
+                            indent.clone()
+                        } else {
+                            " ".repeat(Line::from(indent.as_str()).width())
+                        },
+                        Style::default().fg(MUTED),
+                    ),
+                    Span::styled(value, Style::default().fg(color).italic()),
+                ]));
+            }
+        }
+        if !expand {
+            return;
+        }
+        let child_prefix = format!(
+            "{prefix}{}",
+            match branch {
+                Some(false) => "│  ",
+                Some(true) => "   ",
+                None => "",
+            }
+        );
+        for (index, child) in node.children.iter().enumerate() {
+            self.node(
+                child,
+                &child_prefix,
+                Some(index + 1 == node.children.len()),
+                color,
+            );
+        }
     }
 }
 
 fn document(entry: &Entry, show_companion: bool, width: usize) -> Vec<Line<'static>> {
-    let d = &entry.decoded;
-    let fields: Vec<_> = entry.detail_fields(show_companion).collect();
-    let value = |key: &str| {
-        fields
-            .iter()
-            .find(|(name, _)| name == key)
-            .map(|(_, value)| value.as_str())
+    let mut inspector = Inspector {
+        entry,
+        origin: if show_companion { 0 } else { 3 },
+        width,
+        lines: vec![],
     };
-    let mut lines = vec![];
-    if let Some(warning) = &d.warning {
-        field(&mut lines, "⚠ Warning", warning, Color::Yellow, width);
+    if let Some(warning) = &entry.decoded.warning {
+        field(
+            &mut inspector.lines,
+            "⚠ Warning",
+            warning,
+            Color::Yellow,
+            width,
+        );
     }
     section(
-        &mut lines,
+        &mut inspector.lines,
         "◈ GENERAL PACKET",
-        "",
+        "offset hex · length B",
         ACCENT,
         GENERAL_BG,
         width,
     );
-    if d.rssi.is_some() || d.snr.is_some() {
-        lines.push(Line::from(vec![
-            Span::styled("RSSI  ", Style::default().fg(MUTED)),
-            Span::styled(
-                value("RSSI").unwrap_or("—").to_owned(),
-                Style::default().fg(Color::White).bold(),
-            ),
-            Span::styled("    SNR  ", Style::default().fg(MUTED)),
-            Span::styled(
-                value("SNR").unwrap_or("—").to_owned(),
-                Style::default().fg(PATH).bold(),
-            ),
-        ]));
-    }
-    for (key, caption, color) in [
-        ("Header", "Header", Color::White),
-        ("Transport codes", "Scope codes", SCOPE),
-        ("Region candidates", "Region", SCOPE),
-        ("Path", "Path", PATH),
-        ("Trace SNR samples", "Trace SNR", PATH),
-        ("Companion type", "Companion type", COMPANION),
-    ] {
-        if let Some(value) = value(key) {
-            field(&mut lines, caption, value, color, width);
-        }
+    if !show_companion && (entry.decoded.snr.is_some() || entry.decoded.rssi.is_some()) {
+        let metadata = ["SNR", "RSSI"]
+            .iter()
+            .filter_map(|key| {
+                entry
+                    .decoded
+                    .fields
+                    .iter()
+                    .find(|(name, _)| name == key)
+                    .map(|(name, value)| format!("{name} {value}"))
+            })
+            .collect::<Vec<_>>()
+            .join(" · ");
+        field(&mut inspector.lines, "RX metadata", &metadata, MUTED, width);
     }
     let radio = entry.capture.frame.first() == Some(&0x88);
-    let payload_note = value("Payload").unwrap_or(if radio {
-        "Unavailable"
-    } else {
-        "Companion body"
-    });
-    lines.push(Line::from(""));
-    section(
-        &mut lines,
-        "▣ PAYLOAD",
-        payload_note,
-        PAYLOAD,
-        PAYLOAD_BG,
-        width,
-    );
-    let groups = [
-        (Group::Identity, "Identity · unverified", PATH),
-        (Group::Envelope, "Envelope", PAYLOAD),
-        (Group::Content, "Content", PAYLOAD),
-        (Group::Security, "Authentication fields", Color::Yellow),
-    ];
-    let active_groups = groups
-        .iter()
-        .filter(|(g, _, _)| fields.iter().any(|(key, _)| group(key) == *g))
-        .count();
-    let mut remaining = active_groups;
-    for (kind, title, color) in groups {
-        let mut selected: Vec<_> = fields
-            .iter()
-            .filter(|(key, _)| group(key) == kind)
-            .collect();
-        if selected.is_empty() {
+    let mut has_payload = false;
+    for node in &entry.decoded.structure {
+        if !show_companion && matches!(node.name.as_str(), "Companion type" | "SNR" | "RSSI") {
             continue;
         }
-        remaining -= 1;
-        if kind == Group::Identity {
-            selected.sort_by_key(|(key, _)| match key.as_str() {
-                "Name (unverified)" => 0,
-                "Node role" => 1,
-                "Location (unverified)" => 2,
-                "Advert timestamp" => 3,
-                _ => 4,
-            });
-        }
-        if active_groups > 1 {
-            lines.push(Line::from(Span::styled(
-                format!(" {} {title}", if remaining == 0 { "└─" } else { "├─" }),
-                Style::default().fg(color).bold(),
-            )));
-        }
-        for (key, raw_value) in selected {
-            let formatted = if key == "Advert timestamp" {
-                raw_value
-                    .parse::<i64>()
-                    .ok()
-                    .and_then(|n| chrono::DateTime::from_timestamp(n, 0))
-                    .map(|time| format!("{} · {raw_value}", time.format("%Y-%m-%d %H:%M:%S UTC")))
-            } else {
-                None
-            };
-            field(
-                &mut lines,
-                label(key),
-                formatted.as_deref().unwrap_or(raw_value),
-                value_color(key),
+        let payload = node.name == "Payload"
+            || node.name == "Unparsed remainder"
+            || (!radio && node.name == "Body");
+        if payload {
+            has_payload = true;
+            inspector.lines.push(Line::from(""));
+            let note = format!(
+                "@{:04X} · {} B{}",
+                node.range.start.saturating_sub(inspector.origin),
+                node.range.len(),
+                if node.name == "Unparsed remainder" {
+                    " · boundary unknown"
+                } else {
+                    ""
+                }
+            );
+            section(
+                &mut inspector.lines,
+                "▣ PAYLOAD",
+                &note,
+                PAYLOAD,
+                PAYLOAD_BG,
                 width,
             );
+            if node.children.is_empty() {
+                inspector.node(node, "", None, if radio { PAYLOAD } else { COMPANION });
+            } else {
+                for child in &node.children {
+                    inspector.node(child, "", None, PAYLOAD);
+                }
+            }
+        } else {
+            inspector.node(node, "", None, if radio { ACCENT } else { COMPANION });
         }
     }
-    if active_groups == 0 {
-        lines.push(Line::from(Span::styled(
-            "No decoded payload fields; inspect the bytes below.",
+    if !has_payload {
+        inspector.lines.push(Line::from(""));
+        section(
+            &mut inspector.lines,
+            "▣ PAYLOAD",
+            "Unavailable",
+            PAYLOAD,
+            PAYLOAD_BG,
+            width,
+        );
+        inspector.lines.push(Line::from(Span::styled(
+            "Payload boundary unavailable; inspect partial fields above.",
             Style::default().fg(MUTED).italic(),
         )));
     }
-    lines.push(Line::from(""));
-    byte_dump(&mut lines, entry, show_companion, width);
-    lines
+    inspector.lines.push(Line::from(""));
+    byte_dump(&mut inspector.lines, entry, show_companion, width);
+    inspector.lines
 }
 
 fn scoped(entry: &Entry) -> bool {
@@ -566,8 +758,45 @@ mod tests {
     }
 
     #[test]
-    fn sections_preserve_all_decoded_values_at_different_widths() {
+    fn sections_preserve_wire_order_raw_fields_and_interpretations_at_different_widths() {
         let normalized = |s: &str| s.split_whitespace().collect::<String>();
+        fn check(node: &WireField, entry: &Entry, text: &str) {
+            let normalized = |s: &str| s.split_whitespace().collect::<String>();
+            if node.name == "Path" && entry.decoded.hops == Some(0) {
+                assert!(text.contains("∅·empty"));
+                return;
+            }
+            if node.name == "Path" && !node.children.is_empty() {
+                for child in &node.children {
+                    let bytes = hex(&entry.capture.frame[child.range.clone()]);
+                    assert!(text.contains(&normalized(&bytes)));
+                    let value = child
+                        .interpretation
+                        .strip_suffix(" (i8 / 4)")
+                        .unwrap_or(&child.interpretation);
+                    assert!(text.contains(&normalized(value)));
+                }
+                return;
+            }
+            assert!(
+                text.contains(&normalized(&clean(&node.interpretation))),
+                "lost interpretation {}",
+                node.interpretation
+            );
+            if node.bits.is_none()
+                && (node.children.is_empty()
+                    || node.children.iter().all(|child| child.bits.is_some()))
+            {
+                assert!(
+                    text.contains(&normalized(&hex(&entry.capture.frame[node.range.clone()]))),
+                    "lost bytes for {}",
+                    node.name
+                );
+            }
+            for child in &node.children {
+                check(child, entry, text);
+            }
+        }
         let mut frames: Vec<_> = (0..6).map(sample_frame).collect();
         frames.extend([
             advert(),
@@ -594,17 +823,28 @@ mod tests {
                     let payload = text.find("PAYLOAD").unwrap();
                     let bytes = text.find("BYTES /").unwrap();
                     assert!(general < payload && payload < bytes);
-                    for (_, value) in entry.detail_fields(show_companion) {
-                        assert!(
-                            normalized(&text).contains(&normalized(&clean(value))),
-                            "lost {value}"
-                        );
+                    let parsed = normalized(text.split("⌗").next().unwrap());
+                    for node in &entry.decoded.structure {
+                        if show_companion
+                            || !matches!(node.name.as_str(), "Companion type" | "SNR" | "RSSI")
+                        {
+                            check(node, &entry, &parsed);
+                        }
                     }
-                    // The long advert name and full cryptographic fields must survive wrapping.
+                    // Advert interpretation must follow its bytes, including long signatures.
                     if text.contains("Hilltop") {
                         let name = text.find("Hilltop").unwrap();
                         let signature = text.find("Signature").unwrap();
-                        assert!(payload < name && name < signature);
+                        let key = text.find("Public key").unwrap();
+                        let timestamp = text.find("Timestamp").unwrap();
+                        let app = text.find("Application data").unwrap();
+                        assert!(
+                            payload < key
+                                && key < timestamp
+                                && timestamp < signature
+                                && signature < app
+                                && app < name
+                        );
                     }
                 }
             }
@@ -638,6 +878,101 @@ mod tests {
         assert_eq!(byte_color(&truncated, false, 1), MUTED);
         let companion = make_entry(vec![0x01, 0x02]);
         assert_eq!(byte_color(&companion, true, 0), COMPANION);
+    }
+    #[test]
+    fn scalar_bytes_interpretation_and_offsets_match_the_dump_origin() {
+        let entry = make_entry(vec![0x88, 0x10, 0xa1, 0x0d, 0, 1, 2, 3, 4]);
+        for show_companion in [false, true] {
+            let lines = document(&entry, show_companion, 118);
+            let ack = lines
+                .iter()
+                .map(Line::to_string)
+                .find(|line| line.contains("Acknowledgment"))
+                .unwrap();
+            assert!(ack.starts_with(if show_companion { "0005" } else { "0002" }));
+            assert!(ack.contains("01 02 03 04 → 0x04030201 (u32 LE)"));
+            let header = lines
+                .iter()
+                .map(Line::to_string)
+                .find(|line| line.contains("Header ·"))
+                .unwrap();
+            assert!(header.starts_with(if show_companion { "0003" } else { "0000" }));
+        }
+    }
+
+    #[test]
+    fn compact_paths_keep_hash_boundaries_offsets_and_samples_when_wrapping() {
+        for (width, groups) in [
+            (1, ["A1", "B2"]),
+            (2, ["A1B2", "C3D4"]),
+            (3, ["A1B2C3", "D4E5F6"]),
+        ] {
+            let encoded = ((width as u8 - 1) << 6) | 2;
+            let mut frame = vec![0x88, 0, 150, 0x0d, encoded];
+            frame.extend_from_slice(&[0xa1, 0xb2, 0xc3, 0xd4, 0xe5, 0xf6][..2 * width]);
+            frame.extend_from_slice(&[1, 2, 3, 4]);
+            let entry = make_entry(frame);
+            for show_companion in [false, true] {
+                for columns in [25, 43, 70, 118] {
+                    let lines: Vec<_> = document(&entry, show_companion, columns)
+                        .iter()
+                        .map(Line::to_string)
+                        .collect();
+                    let text = lines.join("\n");
+                    assert!(
+                        !text.contains("Hash 1")
+                            && !text.contains("Entry count")
+                            && !text.contains("Entry width")
+                    );
+                    for group in groups {
+                        // A multi-byte hash must stay together on one line, even in narrow panes.
+                        assert!(
+                            lines
+                                .iter()
+                                .any(|line| line.split_whitespace().any(|word| word == group))
+                        );
+                    }
+                    let path = lines.iter().find(|line| line.contains("Path ·")).unwrap();
+                    assert!(path.starts_with(if show_companion { "0005" } else { "0002" }));
+                    if columns == 118 {
+                        assert!(path.contains(&format!("{} → {}", groups[0], groups[1])));
+                        let length = lines
+                            .iter()
+                            .find(|line| line.contains("Path length"))
+                            .unwrap();
+                        assert!(length.contains(&format!("{encoded:02X} → 2 entries × {width} B")));
+                    }
+                }
+            }
+        }
+        let trace = make_entry(vec![
+            0x88, 0, 150, 0x25, 2, 4, 0xf8, 1, 2, 3, 4, 0, 0, 0, 0, 0,
+        ]);
+        let lines: Vec<_> = document(&trace, false, 118)
+            .iter()
+            .map(Line::to_string)
+            .collect();
+        let path = lines.iter().find(|line| line.contains("Path ·")).unwrap();
+        assert!(path.contains("04 (+1.00 dB) → F8 (-2.00 dB) · i8 / 4"));
+        assert!(!lines.iter().any(|line| line.contains("SNR sample")));
+    }
+
+    #[test]
+    fn empty_paths_are_explicit_and_truncated_paths_keep_partial_bytes_and_warning() {
+        let empty = make_entry(vec![0x88, 0, 150, 0x0d, 0, 1, 2, 3, 4]);
+        let lines: Vec<_> = document(&empty, false, 118)
+            .iter()
+            .map(Line::to_string)
+            .collect();
+        let path = lines.iter().find(|line| line.contains("Path ·")).unwrap();
+        assert!(path.contains("0 B") && path.contains("∅ · empty"));
+        let partial = make_entry(vec![0x88, 0, 150, 0x0d, 0x42, 0xa1, 0xb2, 0xc3]);
+        let lines: Vec<_> = document(&partial, false, 118)
+            .iter()
+            .map(Line::to_string)
+            .collect();
+        let path = lines.iter().find(|line| line.contains("Path ·")).unwrap();
+        assert!(path.contains("A1 B2 C3 → Truncated: expected 4 B, got 3 B"));
     }
 
     #[test]
@@ -724,7 +1059,7 @@ mod tests {
         let mut app = App::new(
             "USB / MeshCore companion".into(),
             100,
-            true,
+            false,
             "unused".into(),
             crate::catalogue::Catalogue::load(dir.path().join("catalogue.json")).unwrap(),
         );
