@@ -3,7 +3,7 @@
 use super::{Decoded, WireField, WireReader};
 use aes::{
     Aes128,
-    cipher::{Block, BlockDecrypt, KeyInit},
+    cipher::{Block, BlockCipherDecrypt, KeyInit},
 };
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
@@ -110,8 +110,8 @@ impl ChannelEnvelope {
                 // Firmware uses a 32-byte secret with a zero-filled tail for 128-bit channels.
                 let mut secret = [0u8; 32];
                 secret[..16].copy_from_slice(key);
-                let mut mac =
-                    <Hmac<Sha256> as Mac>::new_from_slice(&secret).expect("HMAC key length");
+                let mut mac = <Hmac<Sha256> as hmac::KeyInit>::new_from_slice(&secret)
+                    .expect("HMAC key length");
                 mac.update(&self.ciphertext);
                 mac.verify_truncated_left(&self.mac).is_ok()
             })

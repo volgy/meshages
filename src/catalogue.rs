@@ -1,6 +1,6 @@
 //! Manual entries are persisted; built-in entries and device metadata stay in memory.
 use anyhow::{Context, Result, ensure};
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{fs, io::Write, path::PathBuf};
