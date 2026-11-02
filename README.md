@@ -277,6 +277,8 @@ queries device info, the default flood scope, and configured channels. These
 queries share one startup sequence across USB, TCP, and BLE. This tool does not
 configure regions/channels, transmit mesh messages, or drain the message queue.
 Firmware must expose raw RX logs over the selected interface.
+The firmware [logs raw receptions before packet validation](https://github.com/meshcore-dev/MeshCore/blob/main/src/Dispatcher.cpp#L175-L188),
+so the inspector can receive frames that fail later format or decryption checks.
 
 Decoding follows the upstream firmware's
 [companion implementation](https://github.com/meshcore-dev/MeshCore/blob/main/examples/companion_radio/MyMesh.cpp),

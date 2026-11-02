@@ -87,7 +87,10 @@ impl ChannelEnvelope {
     /// Candidates have already been filtered by the channel's on-wire hash.
     pub fn decrypt(&mut self, candidates: impl IntoIterator<Item = (String, [u8; 16])>) {
         if self.ciphertext.is_empty() || !self.ciphertext.len().is_multiple_of(16) {
-            self.status = ChannelStatus::Invalid("expected a nonempty multiple of 16 bytes".into());
+            self.status = ChannelStatus::Invalid(format!(
+                "got {} bytes; expected a nonempty multiple of 16 bytes",
+                self.ciphertext.len()
+            ));
             return;
         }
         let mut unique: BTreeMap<[u8; 16], Vec<String>> = BTreeMap::new();
@@ -483,10 +486,48 @@ mod tests {
             ChannelEnvelope::new(5, bytes(&vector.mac).try_into().unwrap(), ciphertext, 0..32);
         envelope.decrypt([("Public".into(), key)]);
         assert!(matches!(envelope.status, ChannelStatus::MacMismatch));
-        for length in [0, 1, 15, 17, 31, 33] {
+        for length in [0, 1, 15, 17, 31, 33, 47, 116] {
             let mut envelope = ChannelEnvelope::new(5, [0; 2], vec![0; length], 0..length);
             envelope.decrypt([("Public".into(), key)]);
-            assert!(matches!(envelope.status, ChannelStatus::Invalid(_)));
+            assert!(
+                matches!(&envelope.status, ChannelStatus::Invalid(reason) if reason.contains(&format!("got {length} bytes")))
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_ciphertext_length_is_independent_of_relay_path_and_bytes_are_preserved() {
+        // Synthetic equivalents of the 79/80/146/148-byte frames in the reported export.
+        // No captured message contents or identities are included in these fixtures.
+        for (ciphertext_length, count, width, frame_length) in [
+            (47, 24, 1, 79),
+            (47, 25, 1, 80),
+            (116, 11, 2, 146),
+            (116, 12, 2, 148),
+        ] {
+            let encoded = (((width - 1) as u8) << 6) | count as u8;
+            let mut wire = vec![0x88, 0x10, 0xa1, 0x15, encoded];
+            wire.extend((0..count * width).map(|byte| byte as u8));
+            wire.extend_from_slice(&[0x11, 0, 0]); // Public hash and dummy MAC.
+            wire.extend(vec![0x5a; ciphertext_length]);
+            assert_eq!(wire.len(), frame_length);
+            let mut decoded = super::super::decode(&wire);
+            assert!(decoded.warning.is_none());
+            let public = get("public_text");
+            apply_keys(
+                &mut decoded,
+                [("Public".into(), bytes(&public.key).try_into().unwrap())],
+            );
+            let envelope = decoded.channel.as_ref().unwrap();
+            assert_eq!(envelope.range, 8 + count * width..wire.len());
+            assert_eq!(
+                &wire[envelope.range.clone()],
+                &[0x5a].repeat(ciphertext_length)
+            );
+            assert!(
+                matches!(&envelope.status, ChannelStatus::Invalid(reason) if reason.contains(&format!("got {ciphertext_length} bytes")))
+            );
+            super::super::tests::assert_structure(&decoded.structure, 0..wire.len());
         }
     }
 
