@@ -69,6 +69,12 @@ signature, then application flags/location/features/name in their encoded order.
 Paths use compact rows: the encoded length byte followed by count × entry width,
 then fixed-width hashes such as `A217 → B903`, wrapping as needed. Trace paths pair
 each raw sample with its SNR, such as `04 (+1.00 dB) → F8 (-2.00 dB)`.
+Trace payloads separately show the supplied target route, with 1-, 2-, 4-, or
+8-byte hashes selected by the trace flags. Control discovery requests/responses
+show their flags, role filter or node role, correlation tag, optional timestamp,
+and public-key prefix/full key. Reported request SNR is the responding node's
+measurement, distinct from the companion's local RX SNR. Multipart ACKs show the
+remaining-packet count and acknowledgment value.
 
 Catalogue matches are marked as annotations beside the corresponding scope code
 or channel hash. Available channel keys automatically check the MAC and decrypt
@@ -76,11 +82,18 @@ channel text/data. A green **DECRYPTED** subtree appears below the original
 ciphertext, with `p0000` offsets referring to a separate plaintext buffer.
 It shows timestamp, flags, sender name/text, or datagram type/length/data, plus
 padding and any uninterpreted bytes. Channel sender names remain unverified.
-Reserved, unknown, and truncated fields retain their bytes. Advert
-fields and signatures remain explicitly unverified. The default view keeps RX
-signal metadata separate from the radio-byte offsets; `--show-companion` instead
-includes the companion type, SNR, and RSSI bytes in wire order, with offsets that
-match the complete companion-frame dump.
+Reserved, unknown, and truncated fields retain their bytes. Advert signatures
+are checked automatically during capture and replay using strict Ed25519
+verification. The signature field and badge are green for valid signatures,
+red for invalid signatures, and yellow when verification is unavailable (such
+as incomplete envelopes or unsupported versions). A valid signature binds the
+contents to the advertised key; it does not establish a trusted identity.
+Advert names stop at the first NUL, with terminators, padding, and trailing bytes
+shown separately. Invalid UTF-8, malformed ciphertext lengths, and invalid
+signatures produce warnings without changing the captured bytes.
+The default view keeps RX signal metadata separate from the radio-byte offsets;
+`--show-companion` includes the companion type, SNR, and RSSI bytes in wire order,
+with offsets that match the complete companion-frame dump.
 
 The complete offset/hex/ASCII dump follows the decoded fields. Bytes are colored
 by structure, with a legend: teal header, periwinkle scope codes, blue path,
@@ -297,7 +310,9 @@ can choose the displayed sender name. Datagram bodies remain application-defined
 bytes after decoding their type and declared length. Zero bytes within the
 declared data are preserved; padding and malformed trailing data stay inspectable.
 
-Peer messages remain encrypted. Advert signatures are displayed but not verified.
+Peer messages remain encrypted; their ciphertext lengths are checked even without
+a key. Advert signatures are verified automatically when the envelope is complete
+and application data is within the firmware's 32-byte maximum.
 Unknown payloads and unsupported versions retain their bytes. Path hashes do not uniquely identify
 nodes; direct paths contain remaining routing entries, and trace paths contain
 signal samples. Malformed packets stay inspectable with a warning.

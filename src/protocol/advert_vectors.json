@@ -1,0 +1,47 @@
+{
+  "provenance": "Public Cougar advert from michaelhart/meshcore-decoder tests/signature-verification.test.ts at 819242d (MIT). Other signatures generated independently with OpenSSL pkeyutl Ed25519, DER seed bytes 00..1f, timestamp 0xfedcba98; signs public key || timestamp || application data. Test keys only.",
+  "vectors": [
+    {
+      "name": "public_cougar",
+      "packet": "11007e7662676f7f0850a8a355baafbfc1eb7b4174c340442d7d7161c9474a2c94006ce7cf682e58408dd8fcc51906eca98ebf94a037886bdade7ecd09fd92b839491df3809c9454f5286d1d3370ac31a34593d569e9a042a3b41fd331dffb7e18599ce1e60992a076d50238c5b8f85757375354522f50756765744d65736820436f75676172",
+      "status": "valid",
+      "warning": false
+    },
+    {
+      "name": "empty_application",
+      "packet": "110003a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b898badcfe6c6c4defefe6027abbbe8d3e8735c90dc70606ea637af2517861bb969535108408cbe72681e8aa8209fadc301a660ccbd394a875c6b636a945f4f2c2e24d5f0c",
+      "status": "valid",
+      "warning": false
+    },
+    {
+      "name": "optional_fields",
+      "packet": "110003a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b898badcfe475a08fbea4db909b319d5924df178c45ef106e7ed980f79b5cb8002338b7034fd196703a98437d9cebe90863f207af976b0c30ce85194db0046c9c6c377910cf197f01103f20cfeff1234567852c3a96c61697320e69db1e4baac",
+      "status": "valid",
+      "warning": false
+    },
+    {
+      "name": "embedded_nul",
+      "packet": "110003a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b898badcfe70a770c69e504632e6b7bd9e599d87d1686b31d1dc237110fcc573e014e280032e5b5b37f5fe6671b2691b587ff49426c40c42c681a1d650d8527811f6a0680d81416c696365007461696c",
+      "status": "valid",
+      "warning": true
+    },
+    {
+      "name": "invalid_utf8",
+      "packet": "110003a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b898badcfe5e338249df15998e7b2e09175e35aaa5a99e77097a2fbb40bb9a55e529ef1438a80343b34d6eac53332af2d13da44b7973dc2775f75deeb8655c741630e2bd0a81ff",
+      "status": "valid",
+      "warning": true
+    },
+    {
+      "name": "malformed_location",
+      "packet": "110003a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b898badcfe5d708e3d13dd76b66612cb6030b14773019f1e77e593007ea3ce74256d77379b0afe5d1a20d2fbd571b79e343020b0302c651ca47dfe412757e247b11718c30c9101",
+      "status": "valid",
+      "warning": true
+    },
+    {
+      "name": "oversized_application",
+      "packet": "110003a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b898badcfe442d5ca7c9c58e223ff0262d79eb41aecaade46e4eb286a2f3ab0437c244783b67a44f926d87b3a9337aa39c32a7cdbaa408b9f737c139dfaab6b398d24b6906816161616161616161616161616161616161616161616161616161616161616161",
+      "status": "unverified",
+      "warning": true
+    }
+  ]
+}

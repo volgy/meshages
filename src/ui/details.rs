@@ -3,7 +3,7 @@ use super::{ACCENT, COMPANION, MUTED, PANEL, block, packet_color};
 use crate::protocol::channel::{ChannelStatus, Plaintext};
 use crate::{
     app::{App, Entry},
-    protocol::{Route, WireField, hex},
+    protocol::{AdvertSignature, Route, WireField, hex},
 };
 use ratatui::{prelude::*, widgets::*};
 
@@ -144,15 +144,26 @@ fn wire_color(name: &str, inherited: Color) -> Color {
         "Public key"
         | "Sender public key"
         | "Name (unverified)"
+        | "Name"
+        | "Public key prefix"
         | "Node role"
         | "Latitude"
         | "Longitude"
         | "Sender name (unverified)" => PATH,
-        "Padding" => MUTED,
+        "Trace targets" => PATH,
+        "Padding" | "Name terminator" => MUTED,
         "Trailing bytes" => Color::Yellow,
         "MAC" | "Signature" | "Auth code" => Color::Yellow,
         "Acknowledgment" => Color::Green,
         _ => inherited,
+    }
+}
+
+fn signature_style(status: &AdvertSignature) -> (&'static str, Color) {
+    match status {
+        AdvertSignature::Valid => ("VALID SIGNATURE", Color::Green),
+        AdvertSignature::Invalid => ("INVALID SIGNATURE", Color::Red),
+        AdvertSignature::Unverified(_) => ("UNVERIFIED", Color::Yellow),
     }
 }
 
@@ -224,14 +235,31 @@ impl Inspector<'_> {
                 ),
             ]);
         }
-        if node.name != "Path" {
+        let targets = node.name == "Trace targets";
+        if node.name != "Path" && !targets {
             return None;
         }
         if node.children.is_empty() {
+            if targets {
+                return Some(vec![
+                    Span::styled(
+                        node.interpretation.clone(),
+                        Style::default().fg(Color::White),
+                    ),
+                    Span::styled("· ∅", Style::default().fg(MUTED)),
+                ]);
+            }
             return (self.entry.decoded.hops == Some(0))
                 .then(|| vec![Span::styled("∅ · empty", Style::default().fg(MUTED))]);
         }
         let mut values = vec![];
+        if targets {
+            values.push(Span::styled(
+                node.interpretation.clone(),
+                Style::default().fg(Color::White),
+            ));
+            values.push(Span::styled("·", Style::default().fg(MUTED)));
+        }
         for (index, entry) in node.children.iter().enumerate() {
             if index > 0 {
                 values.push(Span::styled("→", Style::default().fg(MUTED)));
@@ -249,7 +277,7 @@ impl Inspector<'_> {
                 ));
             }
         }
-        if self.entry.decoded.kind == "Trace" {
+        if self.entry.decoded.kind == "Trace" && !targets {
             values.push(Span::styled("· i8 / 4", Style::default().fg(MUTED)));
         }
         Some(values)
@@ -310,7 +338,13 @@ impl Inspector<'_> {
     }
 
     fn node(&mut self, node: &WireField, prefix: &str, branch: Option<bool>, inherited: Color) {
-        let color = wire_color(&node.name, inherited);
+        let signature = (!self.plaintext && node.name == "Signature")
+            .then_some(self.entry.decoded.advert_signature.as_ref())
+            .flatten();
+        let color = signature.map_or_else(
+            || wire_color(&node.name, inherited),
+            |status| signature_style(status).1,
+        );
         let tree = match branch {
             Some(true) => "└─ ",
             Some(false) => "├─ ",
@@ -375,11 +409,17 @@ impl Inspector<'_> {
                 || node.interpretation.starts_with("Missing");
             values.push(Span::styled(
                 clean(&node.interpretation),
-                Style::default().fg(if issue { Color::Yellow } else { Color::White }),
+                Style::default().fg(if issue {
+                    Color::Yellow
+                } else if signature.is_some() {
+                    color
+                } else {
+                    Color::White
+                }),
             ));
         }
         if values.is_empty() {
-            self.lines.push(heading);
+            self.heading(heading);
         } else {
             // Labels can spill onto their own row; all values keep a shared column.
             let wide = self.width >= 60;
@@ -390,7 +430,7 @@ impl Inspector<'_> {
                     .spans
                     .push(Span::raw(" ".repeat(column - heading.width())));
             } else {
-                self.lines.push(std::mem::take(&mut heading));
+                self.heading(std::mem::take(&mut heading));
             }
             for (index, value) in styled_wrap(values, self.width.saturating_sub(column))
                 .into_iter()
@@ -468,6 +508,14 @@ impl Inspector<'_> {
                 Some(index + 1 == node.children.len()),
                 color,
             );
+        }
+    }
+
+    fn heading(&mut self, line: Line<'static>) {
+        if line.width() <= self.width {
+            self.lines.push(line);
+        } else {
+            self.lines.extend(styled_wrap(line.spans, self.width));
         }
     }
 }
@@ -703,10 +751,11 @@ pub(super) fn draw(f: &mut Frame, app: &mut App, area: Rect) {
                 Style::default().fg(Color::Yellow).bold(),
             ));
         }
-        if d.fields.iter().any(|(key, _)| key == "Verification") {
+        if let Some(status) = &d.advert_signature {
+            let (badge, color) = signature_style(status);
             badges.push(Span::styled(
-                "  UNVERIFIED",
-                Style::default().fg(Color::Yellow),
+                format!("  {badge}"),
+                Style::default().fg(color).bold(),
             ));
         } else if d
             .channel
@@ -826,6 +875,132 @@ mod tests {
         }
     }
 
+    fn new_payload_frames() -> Vec<Vec<u8>> {
+        let mut frames: Vec<_> = crate::protocol::advert_vectors::all()
+            .iter()
+            .map(|v| crate::protocol::advert_vectors::frame(&v.name))
+            .collect();
+        for (ty, payload) in [
+            (11, vec![0x81, 0x1e, 0xff, 0xff, 0xff, 0xff, 0, 0, 0, 0x80]),
+            (
+                11,
+                vec![0x92, 0xdc, 0x98, 0xba, 0xdc, 0xfe, 1, 2, 3, 4, 5, 6, 7, 8],
+            ),
+            (11, vec![0x31, 0xde, 0xad]),
+            (
+                9,
+                vec![
+                    0x98, 0xba, 0xdc, 0xfe, 0xff, 0xff, 0xff, 0xff, 1, 0xaa, 0xbb, 0xcc, 0xdd,
+                ],
+            ),
+            (9, vec![0; 9]),
+            (9, vec![0, 0, 0, 0, 0, 0, 0, 0, 1, 0xaa]),
+            (10, vec![0x13, 0x98, 0xba, 0xdc, 0xfe]),
+            (10, vec![0x12, 0xde, 0xad]),
+        ] {
+            let mut frame = vec![0x88, 0xf8, 0xa0, (ty << 2) | 2, 0];
+            frame.extend(payload);
+            frames.push(frame);
+        }
+        frames
+    }
+
+    #[test]
+    fn advert_badges_and_signature_fields_use_typed_verification_status_and_colors() {
+        let valid = crate::protocol::advert_vectors::frame("public_cougar");
+        let mut invalid = valid.clone();
+        invalid[41] ^= 1;
+        let incomplete = valid[..60].to_vec();
+        let mut unsupported = valid.clone();
+        unsupported[3] |= 0x40;
+        for (frame, badge, color) in [
+            (valid, "VALID SIGNATURE", Color::Green),
+            (invalid, "INVALID SIGNATURE", Color::Red),
+            (incomplete, "UNVERIFIED", Color::Yellow),
+            (unsupported, "UNVERIFIED", Color::Yellow),
+            (
+                crate::protocol::advert_vectors::frame("oversized_application"),
+                "UNVERIFIED",
+                Color::Yellow,
+            ),
+        ] {
+            for show_companion in [false, true] {
+                let dir = tempfile::tempdir().unwrap();
+                let catalogue =
+                    crate::catalogue::Catalogue::load(dir.path().join("catalogue.json")).unwrap();
+                let mut app = App::new(
+                    "Test".into(),
+                    100,
+                    show_companion,
+                    "unused".into(),
+                    catalogue,
+                );
+                app.push(make_entry(frame.clone()).capture).unwrap();
+                for (width, height) in [(160, 60), (80, 40), (45, 15)] {
+                    app.expand_details = true;
+                    let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+                    terminal.draw(|f| super::super::draw(f, &mut app)).unwrap();
+                    let buffer = terminal.backend().buffer();
+                    let text: String = buffer.content.iter().map(|cell| cell.symbol()).collect();
+                    assert!(text.contains(badge), "missing {badge} at {width}");
+                    for y in 0..height {
+                        let row: String = (0..width).map(|x| buffer[(x, y)].symbol()).collect();
+                        if let Some(start) = row.find(badge) {
+                            let x = Line::from(&row[..start]).width() as u16;
+                            assert_eq!(buffer[(x, y)].fg, color);
+                        }
+                    }
+                }
+                let entry = make_entry(frame.clone());
+                let lines = document(&entry, show_companion, 76);
+                let label = lines
+                    .iter()
+                    .flat_map(|line| &line.spans)
+                    .find(|span| span.content == "Signature");
+                if let Some(label) = label {
+                    assert_eq!(label.style.fg, Some(color));
+                }
+                if badge == "VALID SIGNATURE" {
+                    let text = lines
+                        .iter()
+                        .map(Line::to_string)
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+                    assert!(text.contains("identity not established"));
+                    assert!(!text.contains("unverified"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn new_payloads_render_at_narrow_and_wide_sizes_without_changing_the_dump() {
+        for frame in new_payload_frames() {
+            let entry = make_entry(frame.clone());
+            for show_companion in [false, true] {
+                for width in [25, 43, 76, 118] {
+                    let lines = document(&entry, show_companion, width);
+                    let dump_start = lines
+                        .iter()
+                        .position(|line| line.to_string().contains("BYTES /"))
+                        .unwrap();
+                    let mut expected = vec![];
+                    byte_dump(&mut expected, &entry, show_companion, width);
+                    assert_eq!(&lines[dump_start..], expected);
+                    for line in &lines[..dump_start] {
+                        assert!(
+                            line.width() <= width,
+                            "line exceeds {width}: {:?}",
+                            line.to_string()
+                        );
+                    }
+                    assert_eq!(entry.capture.frame, frame);
+                }
+            }
+        }
+    }
+
     #[test]
     fn decrypted_fields_use_plaintext_offsets_after_ciphertext_and_preserve_the_full_dump() {
         use crate::protocol::channel::test_vectors::{bytes, frame, get};
@@ -866,7 +1041,7 @@ mod tests {
                         assert!(
                             text.contains("Alice")
                                 && normalized.contains("hellomesh")
-                                && text.contains("Sender name (unverified)")
+                                && normalized.contains("Sendername(unverified)")
                         );
                         let sender_bytes = "41 6C 69 63 65";
                         let mac_bytes = hex(&bytes(&vector.mac));
@@ -1020,6 +1195,7 @@ mod tests {
             }
         }
         let mut frames: Vec<_> = (0..6).map(sample_frame).collect();
+        frames.extend(new_payload_frames());
         frames.extend([
             advert(),
             vec![0x88],

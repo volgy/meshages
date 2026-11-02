@@ -593,6 +593,8 @@ fn help(f: &mut Frame, colors: bool) {
         Line::from("Path entries are hashes, not unique node identities. Direct"),
         Line::from("routes show remaining path; trace paths contain SNR samples."),
         Line::from("Channel keys decrypt text/data; sender names remain unverified."),
+        Line::from("Advert signatures are checked automatically; a valid signature"),
+        Line::from("binds contents to the advertised key, not a trusted identity."),
         Line::from(""),
         Line::from("Retention is bounded. --record saves frames before eviction."),
         Line::from("Default details show radio bytes; --show-companion shows companion"),

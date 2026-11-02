@@ -2,7 +2,12 @@
 use chrono::{DateTime, Local};
 use serde::{Deserialize, Serialize};
 use std::ops::Range;
+mod advert;
 pub mod channel;
+mod payloads;
+pub use advert::AdvertSignature;
+#[cfg(test)]
+pub(crate) use advert::test_vectors as advert_vectors;
 
 pub const MAX_FRAME: usize = 176; // companion MAX_FRAME_SIZE
 
@@ -32,6 +37,7 @@ pub struct Decoded {
     pub scope: Option<Scope>,
     pub channel_hash: Option<u8>,
     pub channel: Option<channel::ChannelEnvelope>,
+    pub advert_signature: Option<AdvertSignature>,
 }
 
 #[derive(Clone, Debug)]
@@ -149,6 +155,17 @@ impl Decoded {
     fn field(&mut self, key: &str, value: impl ToString) {
         self.fields.push((key.into(), value.to_string()));
     }
+    fn warn(&mut self, message: impl AsRef<str>) {
+        let message = message.as_ref();
+        match &mut self.warning {
+            Some(warning) if warning == message => {}
+            Some(warning) => {
+                warning.push_str("; ");
+                warning.push_str(message);
+            }
+            None => self.warning = Some(message.into()),
+        }
+    }
 }
 
 pub fn hex(bytes: &[u8]) -> String {
@@ -218,7 +235,7 @@ pub fn decode(frame: &[u8]) -> Decoded {
         return d;
     }
     if let Err(e) = decode_mesh(&frame[3..], &mut d) {
-        d.warning = Some(e.into());
+        d.warn(e);
         d.summary = format!("{} · malformed", d.kind);
     }
     d.summary.push_str(&format!(" · {} B", frame.len() - 3));
@@ -260,6 +277,9 @@ fn decode_packet(r: &mut WireReader<'_>, d: &mut Decoded) -> Result<(), &'static
         _ => "Unknown",
     }
     .into();
+    if ty == 4 {
+        d.advert_signature = Some(AdvertSignature::Unverified("Incomplete advert envelope"));
+    }
     d.route = Some(match route {
         0 => Route::ScopedFlood,
         1 => Route::Flood,
@@ -400,12 +420,20 @@ fn decode_packet(r: &mut WireReader<'_>, d: &mut Decoded) -> Result<(), &'static
     }
     if p.len() > 184 {
         r.value("Payload exceeds MeshCore maximum; not interpreted");
+        if ty == 4 {
+            d.advert_signature = Some(AdvertSignature::Unverified(
+                "Payload exceeds MeshCore maximum",
+            ));
+        }
         return Err("Payload exceeds MeshCore maximum");
     }
     d.field("Payload", format!("{} bytes · type 0x{ty:02X}", p.len()));
     d.summary = format!("{route_name} · {count} path entries");
     if version != 0 {
         r.value("Unsupported version; not interpreted");
+        if ty == 4 {
+            d.advert_signature = Some(AdvertSignature::Unverified("Unsupported payload version"));
+        }
         d.warning =
             Some("Unsupported payload version; body preserved without interpretation".into());
         return Ok(());
@@ -440,7 +468,7 @@ fn decode_payload(r: &mut WireReader<'_>, d: &mut Decoded, ty: u8) -> Result<(),
                 .map_err(|_| "Truncated encrypted peer payload")?;
             d.field("MAC", hex(mac));
             r.value("Cipher MAC · not verified");
-            ciphertext(r, d, "peer secret", "Truncated encrypted peer payload")?;
+            peer_ciphertext(r, d, "peer secret");
         }
         5 | 6 => {
             let hash = r
@@ -480,36 +508,7 @@ fn decode_payload(r: &mut WireReader<'_>, d: &mut Decoded, ty: u8) -> Result<(),
                 return Err("ACK must contain exactly four bytes");
             }
         }
-        4 => {
-            let key = r
-                .read("Public key", 32)
-                .map_err(|_| "Truncated advertisement (key, timestamp, signature)")?;
-            d.field("Public key", hex(key));
-            r.value("Ed25519 · unverified");
-            let bytes = r
-                .read("Advert timestamp", 4)
-                .map_err(|_| "Truncated advertisement (key, timestamp, signature)")?;
-            let timestamp = u32::from_le_bytes(bytes.try_into().unwrap());
-            d.field("Advert timestamp", timestamp);
-            let date = chrono::DateTime::from_timestamp(timestamp.into(), 0).unwrap();
-            r.value(format!(
-                "{} · {timestamp} (u32 LE)",
-                date.format("%Y-%m-%d %H:%M:%S UTC")
-            ));
-            let signature = r
-                .read("Signature", 64)
-                .map_err(|_| "Truncated advertisement (key, timestamp, signature)")?;
-            d.field("Signature", hex(signature));
-            d.field("Verification", "Signature not verified");
-            r.value("Ed25519 · signature not verified");
-            let bytes = r.rest("Application data", "Unverified");
-            d.field("Application data", hex(bytes));
-            let mut app = WireReader::new(bytes, r.fields.last().unwrap().range.start);
-            let result = decode_advert_app(&mut app, d);
-            app.preserve_remainder();
-            r.fields.last_mut().unwrap().children = app.fields;
-            result?;
-        }
+        4 => advert::decode(r, d)?,
         7 => {
             let dst = r
                 .read("Destination hash", 1)
@@ -526,24 +525,11 @@ fn decode_payload(r: &mut WireReader<'_>, d: &mut Decoded, ty: u8) -> Result<(),
                 .map_err(|_| "Truncated anonymous request")?;
             d.field("MAC", hex(mac));
             r.value("Cipher MAC · not verified");
-            ciphertext(r, d, "recipient secret", "Truncated anonymous request")?;
+            peer_ciphertext(r, d, "recipient secret");
         }
-        9 => {
-            let tag = r
-                .read("Trace tag", 4)
-                .map_err(|_| "Truncated trace payload")?;
-            d.field("Trace tag", hex(tag));
-            let auth = r
-                .read("Auth code", 4)
-                .map_err(|_| "Truncated trace payload")?;
-            d.field("Auth code", hex(auth));
-            r.value("Authentication code · not verified");
-            let flags = r.read("Flags", 1).map_err(|_| "Truncated trace payload")?[0];
-            d.field("Flags", format!("0x{flags:02X}"));
-            r.value(format!("0b{flags:08b}"));
-            let data = r.rest("Trace data", "Not interpreted");
-            d.field("Trace data", hex(data));
-        }
+        9 => payloads::trace(r, d)?,
+        10 => payloads::multipart(r, d)?,
+        11 => payloads::control(r, d)?,
         _ => {
             let body = r.rest("Body", "Not interpreted");
             d.field("Body", hex(body));
@@ -566,72 +552,19 @@ fn ciphertext<'a>(
     Ok(bytes)
 }
 
-fn decode_advert_app(r: &mut WireReader<'_>, d: &mut Decoded) -> Result<(), &'static str> {
-    if r.remaining() == 0 {
-        return Ok(());
-    }
-    let flags = r.read("Flags", 1)?[0];
-    let offset = r.fields.last().unwrap().range.start;
-    let role = match flags & 15 {
-        1 => "Companion",
-        2 => "Repeater",
-        3 => "Room server",
-        4 => "Sensor",
-        _ => "Unknown",
-    };
-    d.field("Node role", role);
-    r.fields.last_mut().unwrap().children = vec![WireField::bit("Node role", offset, 0..4, role)];
-    for (bit, name) in [
-        (4, "Location present"),
-        (5, "Feature 1 present"),
-        (6, "Feature 2 present"),
-        (7, "Name present"),
-    ] {
-        r.fields.last_mut().unwrap().children.push(WireField::bit(
-            name,
-            offset,
-            bit..bit + 1,
-            if flags & (1 << bit) != 0 { "yes" } else { "no" },
-        ));
-    }
-    if flags & 0x10 != 0 {
-        let lat = r
-            .read("Latitude", 4)
-            .map_err(|_| "Truncated advert coordinates")?;
-        let lat_raw = i32::from_le_bytes(lat.try_into().unwrap());
-        let lat = lat_raw as f64 / 1e6;
-        r.value(format!("{lat:.6}° · {lat_raw} (i32 LE / 10⁶) · unverified"));
-        let lon = r
-            .read("Longitude", 4)
-            .map_err(|_| "Truncated advert coordinates")?;
-        let lon_raw = i32::from_le_bytes(lon.try_into().unwrap());
-        let lon = lon_raw as f64 / 1e6;
-        r.value(format!("{lon:.6}° · {lon_raw} (i32 LE / 10⁶) · unverified"));
-        d.field("Location (unverified)", format!("{lat:.6}, {lon:.6}"));
-    }
-    for (bit, name) in [(0x20, "Feature 1"), (0x40, "Feature 2")] {
-        if flags & bit != 0 {
-            let bytes = r
-                .read(name, 2)
-                .map_err(|_| "Truncated advert feature field")?;
-            d.field(name, hex(bytes));
-            r.value("Reserved for future use");
-        }
-    }
-    if flags & 0x80 != 0 {
-        let bytes = r.rest("Name (unverified)", "");
-        let name = String::from_utf8_lossy(bytes)
-            .trim_end_matches('\0')
-            .to_string();
-        r.value(format!("{name} (UTF-8 · unverified)"));
-        d.field("Name (unverified)", &name);
-        d.summary = format!(
-            "{name} · {} · {} path entries",
-            d.route.unwrap().name(),
-            d.hops.unwrap()
+fn peer_ciphertext(r: &mut WireReader<'_>, d: &mut Decoded, secret: &str) {
+    let bytes = r.rest("Ciphertext", "");
+    let size = bytes.len();
+    let mut description = format!("Encrypted · {size} bytes · {secret} required");
+    if size == 0 || !size.is_multiple_of(16) {
+        let warning = format!(
+            "Invalid peer ciphertext: got {size} bytes; expected a nonempty multiple of 16 bytes"
         );
+        d.warn(&warning);
+        description.push_str(&format!(" · {warning}"));
     }
-    Ok(())
+    r.value(&description);
+    d.field("Content", description);
 }
 
 /// Incremental serial/TCP deframer. Discards noise and rejects oversized lengths.
@@ -752,32 +685,36 @@ mod tests {
         for (ty, length, names) in [
             (
                 0,
-                19,
+                20,
                 vec!["Destination hash", "Source hash", "MAC", "Ciphertext"],
             ),
             (
                 1,
-                19,
+                20,
                 vec!["Destination hash", "Source hash", "MAC", "Ciphertext"],
             ),
             (
                 2,
-                19,
+                20,
                 vec!["Destination hash", "Source hash", "MAC", "Ciphertext"],
             ),
             (
                 8,
-                19,
+                20,
                 vec!["Destination hash", "Source hash", "MAC", "Ciphertext"],
             ),
             (5, 19, vec!["Channel hash", "MAC", "Ciphertext"]),
             (6, 19, vec!["Channel hash", "MAC", "Ciphertext"]),
             (
                 7,
-                36,
+                51,
                 vec!["Destination hash", "Sender public key", "MAC", "Ciphertext"],
             ),
-            (9, 10, vec!["Trace tag", "Auth code", "Flags", "Trace data"]),
+            (
+                9,
+                10,
+                vec!["Trace tag", "Auth code", "Flags", "Trace targets"],
+            ),
             (15, 19, vec!["Body"]),
         ] {
             let mut frame = vec![0x88, 0, 150, ty << 2 | 1, 0];
@@ -812,6 +749,33 @@ mod tests {
         assert!(partial_mac.interpretation.contains("expected 2 B, got 1 B"));
     }
     #[test]
+    fn encrypted_peer_lengths_are_validated_without_keys_or_changing_wire_bytes() {
+        for ty in [0, 1, 2, 7, 8] {
+            for size in [0, 1, 15, 16, 17, 32, 47, 116] {
+                let mut frame = vec![0x88, 0, 150, ty << 2 | 1, 0];
+                frame.extend(vec![0; if ty == 7 { 35 } else { 4 }]);
+                frame.extend(vec![0xa5; size]);
+                let original = frame.clone();
+                let decoded = decode(&frame);
+                assert_structure(&decoded.structure, 0..frame.len());
+                assert_eq!(frame, original);
+                if size == 16 || size == 32 {
+                    assert!(decoded.warning.is_none());
+                } else {
+                    assert!(
+                        decoded
+                            .warning
+                            .unwrap()
+                            .contains(&format!("got {size} bytes"))
+                    );
+                }
+                let ciphertext = decoded.structure.last().unwrap().children.last().unwrap();
+                assert_eq!(ciphertext.name, "Ciphertext");
+                assert_eq!(ciphertext.range.len(), size);
+            }
+        }
+    }
+    #[test]
     fn advert_tree_preserves_optional_fields_and_every_truncation() {
         let mut frame = vec![0x88, 0, 150, 0x11, 0];
         frame.extend(0..32);
@@ -823,7 +787,7 @@ mod tests {
         frame.extend_from_slice(&[0x12, 0x34, 0x56, 0x78]);
         frame.extend_from_slice("Rélais 東京".as_bytes());
         let d = decode(&frame);
-        assert!(d.warning.is_none());
+        assert_eq!(d.advert_signature, Some(AdvertSignature::Invalid));
         let fields = &d.structure.last().unwrap().children;
         assert_eq!(
             fields
@@ -848,7 +812,7 @@ mod tests {
                 ("Longitude", 110..114),
                 ("Feature 1", 114..116),
                 ("Feature 2", 116..118),
-                ("Name (unverified)", 118..frame.len()),
+                ("Name", 118..frame.len()),
             ]
         );
         assert!(app[1].interpretation.starts_with("51.507351°"));
